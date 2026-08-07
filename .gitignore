@@ -1,0 +1,17 @@
+# secrets — never commit
+.env
+
+# data
+*.db
+*.db-wal
+*.db-shm
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# editor / os
+.vscode/
+.DS_Store

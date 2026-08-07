@@ -1,0 +1,75 @@
+# docker compose up --build
+# -> http://localhost:8000        chart UI (offline demo, mock LLM, no keys)
+# -> http://localhost:8222        NATS monitoring
+# Flip to live market data + a real LLM via .env (see .env.example).
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]          # JetStream + HTTP monitoring
+    ports: ["4222:4222", "8222:8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 5s
+      retries: 5
+
+  ingest:
+    build: .
+    command: python -m market_agent.services.ingest
+    environment:
+      NATS_URL: nats://nats:4222            # service discovery by DNS name
+      DB_PATH: /data/market_agent.db
+      SYMBOL: ${SYMBOL:-BTCUSDT}
+      INGEST_MODE: ${INGEST_MODE:-demo}     # demo | live
+      DEMO_INTERVAL_S: ${DEMO_INTERVAL_S:-3}
+      METRICS_PORT: "9101"
+    volumes: [agent-data:/data]
+    depends_on:
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+
+  analyzer:
+    build: .
+    command: python -m market_agent.services.analyzer
+    environment:
+      NATS_URL: nats://nats:4222
+      DB_PATH: /data/market_agent.db
+      ANALYZE_EVERY: ${ANALYZE_EVERY:-1}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}   # mock runs with zero keys
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      METRICS_PORT: "9102"
+    volumes: [agent-data:/data]
+    depends_on:
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+    # scale out: docker compose up --scale analyzer=3
+    # (NATS queue group load-balances bars across replicas)
+
+  paper:
+    build: .
+    command: python -m market_agent.services.paper_trader
+    environment:
+      NATS_URL: nats://nats:4222
+      DB_PATH: /data/market_agent.db
+      RISK_PER_TRADE: ${RISK_PER_TRADE:-100}
+      METRICS_PORT: "9103"
+    volumes: [agent-data:/data]
+    depends_on:
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+
+  api:
+    build: .
+    command: uvicorn market_agent.services.api:app --host 0.0.0.0 --port 8000
+    ports: ["8000:8000"]
+    environment:
+      NATS_URL: nats://nats:4222
+      DB_PATH: /data/market_agent.db
+    volumes: [agent-data:/data]
+    depends_on:
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  agent-data:

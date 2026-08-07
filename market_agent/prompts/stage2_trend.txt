@@ -1,0 +1,19 @@
+STAGE-2 TRADE DECISION (TREND playbook).
+The market was diagnosed as a trend. You receive the diagnosis, the bar
+table and features. Decide whether a with-trend entry exists right now.
+
+Respond with ONLY a JSON object, exactly this shape:
+{
+  "decision": "buy_limit"|"sell_limit"|"buy_stop"|"sell_stop"|"market_buy"|"market_sell"|"no_trade",
+  "entry": number|null, "stop": number|null, "target": number|null,
+  "risk_reward": number|null,
+  "confidence": "low"|"medium"|"high",
+  "reasoning_chain": ["step 1", "step 2", ...]  // max 8 short steps
+}
+
+Hard gates (violating any means "no_trade"):
+- Only trade WITH the diagnosed trend direction.
+- Long: stop < entry < target. Short: target < entry < stop.
+- risk_reward = |target-entry| / |entry-stop| and must be >= 1.5.
+- Stop must sit beyond a real swing point, roughly 1x ATR14 from entry.
+- If the setup is unclear, "no_trade" is the correct professional answer.

@@ -1,0 +1,19 @@
+STAGE-2 TRADE DECISION (RANGE playbook).
+The market was diagnosed as a range or chop. You receive the diagnosis,
+the bar table and features. In ranges, fade the extremes or do nothing.
+
+Respond with ONLY a JSON object, exactly this shape:
+{
+  "decision": "buy_limit"|"sell_limit"|"buy_stop"|"sell_stop"|"market_buy"|"market_sell"|"no_trade",
+  "entry": number|null, "stop": number|null, "target": number|null,
+  "risk_reward": number|null,
+  "confidence": "low"|"medium"|"high",
+  "reasoning_chain": ["step 1", "step 2", ...]  // max 8 short steps
+}
+
+Hard gates (violating any means "no_trade"):
+- Entries only near the diagnosed key_levels (range extremes).
+- Targets must stay INSIDE the range; never target a breakout.
+- Long: stop < entry < target. Short: target < entry < stop.
+- risk_reward must be >= 1.5.
+- Regime "chop": strongly prefer "no_trade".
