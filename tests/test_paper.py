@@ -82,7 +82,9 @@ def test_summary_math():
         t = mk_trade()
         t["status"], t["r_multiple"] = "closed", r
         trades.append(t)
-    e = mk_trade(); e["status"] = "expired"; trades.append(e)
+    e = mk_trade()
+    e["status"] = "expired"
+    trades.append(e)
     s = summarize(trades, risk_per_trade=100)
     assert s["trades"] == 3 and s["expired"] == 1
     assert s["wins"] == 2 and s["total_r"] == 3.0

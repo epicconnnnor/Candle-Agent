@@ -1,5 +1,7 @@
 # candle-agent
 
+[![CI](https://github.com/epicconnnnor/Candle-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/epicconnnnor/Candle-Agent/actions/workflows/ci.yml)
+
 Event-driven microservices pipeline: streams live market bars, computes
 bar-geometry features locally, runs a **two-stage LLM analysis**
 (market diagnosis �?strategy routing �?schema-validated trade decision),
