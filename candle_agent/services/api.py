@@ -1,7 +1,7 @@
 """API/UI service.
 
 REST for bars + latest analysis, POST /api/analyze publishes an
-analysis.request on the bus (event-driven â€?this service never runs the
+analysis.request on the bus (event-driven â€” this service never runs the
 LLM itself), and /api/events is an SSE stream: the service holds an
 ephemeral bus subscription and fans events out to every connected browser.
 

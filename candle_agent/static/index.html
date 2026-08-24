@@ -22,7 +22,7 @@
     padding: 14px 20px; border-bottom: 1px solid var(--border);
   }
   header h1 { font-size: 15px; font-weight: 500; letter-spacing: 0.08em; }
-  header h1::before { content: "â–?"; color: var(--accent); }
+  header h1::before { content: "â–® "; color: var(--accent); }
   #status { font-size: 12px; color: var(--muted); margin-left: auto; }
   main { display: flex; flex: 1; min-height: 0; }
   #chart { flex: 1; min-width: 0; }
@@ -57,13 +57,13 @@
 <header>
   <h1>candle-agent</h1>
   <span id="symbol">BTCUSDT</span>
-  <span id="status">loadingâ€?/span>
+  <span id="status">loadingâ€¦</span>
 </header>
 <main>
   <div id="chart"></div>
   <aside>
     <h2>Decision</h2>
-    <div id="decision" class="decision flat">â€?/div>
+    <div id="decision" class="decision flat">â€”</div>
     <div id="levels"></div>
     <h2>Diagnosis</h2>
     <div id="diagnosis" class="empty">No analysis yet.</div>
@@ -124,7 +124,7 @@ function renderAnalysis(a) {
     <div class="kv"><span>entry</span><span>${s2.entry}</span></div>
     <div class="kv"><span>stop</span><span>${s2.stop}</span></div>
     <div class="kv"><span>target</span><span>${s2.target}</span></div>
-    <div class="kv"><span>R:R</span><span>${s2.risk_reward ?? "â€?}</span></div>
+    <div class="kv"><span>R:R</span><span>${s2.risk_reward ?? "â€”"}</span></div>
     <div class="kv"><span>confidence</span><span>${s2.confidence}</span></div>`;
   document.getElementById("diagnosis").innerHTML =
     `<div class="kv"><span>regime</span><span>${s1.regime}</span></div>
@@ -153,7 +153,7 @@ function renderPaper(p) {
   if (s.trades) {
     const pnlCls = s.total_r >= 0 ? "long" : "short";
     html += `<div class="kv"><span>closed trades</span><span>${s.trades}</span></div>
-      <div class="kv"><span>win rate</span><span>${s.win_rate != null ? (s.win_rate*100).toFixed(0)+"%" : "â€?}</span></div>
+      <div class="kv"><span>win rate</span><span>${s.win_rate != null ? (s.win_rate*100).toFixed(0)+"%" : "â€”"}</span></div>
       <div class="kv"><span>total R</span><span class="${pnlCls}">${s.total_r}</span></div>
       <div class="kv"><span>paper P&L</span><span class="${pnlCls}">$${s.pnl_usd}</span></div>`;
   }
@@ -175,7 +175,7 @@ async function runAnalysis() {
   // POST publishes an analysis.request on the bus and returns 202;
   // the result arrives on the SSE stream below.
   const btn = document.getElementById("run");
-  btn.disabled = true; btn.textContent = "Queuedâ€?;
+  btn.disabled = true; btn.textContent = "Queuedâ€¦";
   await fetch(`/api/analyze/${SYMBOL}`, { method: "POST" });
 }
 
@@ -198,7 +198,7 @@ es.onmessage = (m) => {
     btn.disabled = false; btn.textContent = "Run analysis";
   }
 };
-es.onerror = () => { document.getElementById("status").textContent = "event stream reconnectingâ€?; };
+es.onerror = () => { document.getElementById("status").textContent = "event stream reconnectingâ€¦"; };
 
 loadBars().then(loadAnalysis).then(loadPaper);
 </script>
