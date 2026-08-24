@@ -2,21 +2,21 @@
 
 Event-driven microservices pipeline: streams live market bars, computes
 bar-geometry features locally, runs a **two-stage LLM analysis**
-(market diagnosis �?strategy routing �?schema-validated trade decision),
+(market diagnosis �?strategy routing �?schema-validated trade decision),
 and pushes results to a live web chart over SSE.
 
-**Analysis only �?this never places orders.**
+**Analysis only �?this never places orders.**
 
 ```
-                 ┌──────────�?  bars.closed.*    ┌────────────�?
- Binance ─wss──�?�? ingest  �?──────────────────►│  analyzer  │──�?LLM (2-stage)
- (or demo gen)   └────┬─────�?  NATS JetStream   └─────┬──────�?   + JSON schema
-                      �?       (at-least-once,         �?          + consistency gates
-                      �?        durable consumer)      �?analysis.completed.*
-                      �?                               �?
-                   SQLite ◄───────────────────── ┌──────────�?  SSE    ┌─────────�?
-                   (WAL)                         �?  api    �?───────�?�?browser �?
-                                                 └──────────�?         └─────────�?
+                 ┌──────────┐   bars.closed.*    ┌────────────┐
+ Binance ─wss──► │  ingest  │ ──────────────────►│  analyzer  │──► LLM (2-stage)
+ (or demo gen)   └────┬─────┘   NATS JetStream   └─────┬──────┘    + JSON schema
+                      │        (at-least-once,         │           + consistency gates
+                      │         durable consumer)      │ analysis.completed.*
+                      ▼                                ▼
+                   SQLite ◄───────────────────── ┌──────────┐   SSE    ┌─────────┐
+                   (WAL)                         │   api    │ ───────► │ browser │
+                                                 └──────────┘          └─────────┘
 ```
 
 Three independently deployable services sharing one image:
@@ -28,12 +28,12 @@ Three independently deployable services sharing one image:
 | `paper`    | forward paper trading: simulates fills/stops/targets against live bars; crash-safe (recovers open positions from DB) | :9103 |
 | `api`      | REST + SSE fan-out; k8s-style `/healthz`; Prometheus `/metrics` | :8000 |
 
-## Quickstart (offline demo �?zero keys, zero market data)
+## Quickstart (offline demo �?zero keys, zero market data)
 
 ```bash
 docker compose up --build
-# http://localhost:8000  �?live chart, synthetic bar every 3s, mock LLM
-# http://localhost:8222  �?NATS monitoring
+# http://localhost:8000  �?live chart, synthetic bar every 3s, mock LLM
+# http://localhost:8222  �?NATS monitoring
 ```
 
 ## Live mode
@@ -56,7 +56,7 @@ docker compose start analyzer    # backlog is redelivered and drained
 
 The analyzer only ACKs a bar after its analysis is stored. Un-ACKed
 messages are redelivered (`ack_wait=120s`), so a crash mid-analysis is
-retried �?on a peer replica if you've scaled out:
+retried �?on a peer replica if you've scaled out:
 
 ```bash
 docker compose up --scale analyzer=3    # JetStream load-balances the durable consumer
@@ -73,8 +73,8 @@ The `paper` service turns the analyzer's calls into simulated trades:
 - one trade per symbol; a newer signal replaces a *pending* order but
   never touches an *open* position
 - results in R-multiples + fixed-$-risk P&L (`RISK_PER_TRADE`, default $100)
-- `GET /api/paper/BTCUSDT` �?active position, history, win rate, total R
-- fills are frictionless (no fees/slippage) �?a known limitation
+- `GET /api/paper/BTCUSDT` �?active position, history, win rate, total R
+- fills are frictionless (no fees/slippage) �?a known limitation
 
 The fill logic is pure functions (`candle_agent/paper.py`), so the
 future backtest harness replays historical bars through the exact same
@@ -127,4 +127,4 @@ pytest        # 19 tests: features, pipeline, consistency gates, fill simulation
 ## Disclaimer
 
 Educational project. Not financial advice. The author is fully aware an
-LLM reading candles will not beat the market �?that's not the point.
+LLM reading candles will not beat the market �?that's not the point.
