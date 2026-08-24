@@ -4,7 +4,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 
-DB_PATH = os.environ.get("DB_PATH", "market_agent.db")
+DB_PATH = os.environ.get("DB_PATH", "candle_agent.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bars (

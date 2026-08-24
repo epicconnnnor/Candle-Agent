@@ -6,7 +6,7 @@ Live mode:  holds a persistent TLS websocket to Binance (<symbol>@kline_1m),
 Demo mode:  seeds N historical synthetic bars, then emits a new synthetic
             bar every DEMO_INTERVAL_S so the whole pipeline runs offline.
 
-    python -m market_agent.services.ingest
+    python -m candle_agent.services.ingest
 """
 import asyncio
 import json

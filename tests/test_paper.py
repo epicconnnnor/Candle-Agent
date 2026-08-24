@@ -1,4 +1,4 @@
-from market_agent.paper import (PENDING_TTL_BARS, on_bar, summarize,
+from candle_agent.paper import (PENDING_TTL_BARS, on_bar, summarize,
                                 trade_from_decision)
 
 

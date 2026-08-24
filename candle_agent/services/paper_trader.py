@@ -2,13 +2,13 @@
 
 Subscribes to analysis.completed.* (new signals) and bars.closed.*
 (price updates). Simulates order fills, stops and targets against real
-incoming bars and persists every trade â€” a forward test with zero
+incoming bars and persists every trade â€?a forward test with zero
 execution risk. Publishes paper.update.* events for the UI.
 
 Crash-safe: the active trade lives in the DB, so a restarted replica
 reloads it and carries on (state recovery, not just stateless retry).
 
-    python -m market_agent.services.paper_trader
+    python -m candle_agent.services.paper_trader
 """
 import asyncio
 

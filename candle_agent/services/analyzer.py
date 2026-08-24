@@ -2,10 +2,10 @@
 
 Durable JetStream consumer in queue group "analyzers": scale it out with
 more replicas and NATS load-balances bars across them. Each message is
-ACKed only after the analysis is stored â€” kill an analyzer mid-run and
+ACKed only after the analysis is stored â€?kill an analyzer mid-run and
 the bar is redelivered to a surviving replica (at-least-once delivery).
 
-    python -m market_agent.services.analyzer
+    python -m candle_agent.services.analyzer
 """
 import asyncio
 import time
@@ -70,7 +70,7 @@ async def _handle(js, msg, forced: bool):
 
 async def _consume(js, subject: str, durable: str, forced: bool):
     """Pull-consumer loop. Every analyzer replica binds to the SAME durable
-    consumer, so JetStream hands each message to exactly one replica â€”
+    consumer, so JetStream hands each message to exactly one replica â€?
     horizontal scaling with no extra coordination."""
     cc = ConsumerConfig(ack_policy=AckPolicy.EXPLICIT,
                         deliver_policy=DeliverPolicy.NEW,

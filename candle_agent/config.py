@@ -3,7 +3,7 @@ environment variables (12-factor) so the same image runs anywhere."""
 import os
 
 NATS_URL = os.environ.get("NATS_URL", "nats://localhost:4222")
-DB_PATH = os.environ.get("DB_PATH", "market_agent.db")
+DB_PATH = os.environ.get("DB_PATH", "candle_agent.db")
 SYMBOL = os.environ.get("SYMBOL", "BTCUSDT").upper()
 
 # ingest

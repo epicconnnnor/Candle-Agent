@@ -3,12 +3,12 @@ import os
 import pytest
 
 os.environ["LLM_PROVIDER"] = "mock"
-os.environ["DB_PATH"] = "/tmp/test_market_agent.db"
+os.environ["DB_PATH"] = "/tmp/test_candle_agent.db"
 
-from market_agent import db
-from market_agent.demo import synthetic_bars
-from market_agent.orchestrator import analyze
-from market_agent.schemas import consistency_errors
+from candle_agent import db
+from candle_agent.demo import synthetic_bars
+from candle_agent.orchestrator import analyze
+from candle_agent.schemas import consistency_errors
 
 
 def seed(symbol, n_bars):

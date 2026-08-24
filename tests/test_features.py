@@ -1,4 +1,4 @@
-from market_agent.features import ema, atr, bar_geometry, build_feature_packet
+from candle_agent.features import ema, atr, bar_geometry, build_feature_packet
 
 
 def mk(o, h, l, c, ts=0, v=1.0):

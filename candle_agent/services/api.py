@@ -1,11 +1,11 @@
 """API/UI service.
 
 REST for bars + latest analysis, POST /api/analyze publishes an
-analysis.request on the bus (event-driven â€” this service never runs the
+analysis.request on the bus (event-driven â€?this service never runs the
 LLM itself), and /api/events is an SSE stream: the service holds an
 ephemeral bus subscription and fans events out to every connected browser.
 
-    uvicorn market_agent.services.api:app
+    uvicorn candle_agent.services.api:app
 """
 import asyncio
 import json
@@ -48,7 +48,7 @@ async def lifespan(app):
     await nc.drain()
 
 
-app = FastAPI(title="market-agent", lifespan=lifespan)
+app = FastAPI(title="candle-agent", lifespan=lifespan)
 app.mount("/metrics", make_asgi_app())
 
 
