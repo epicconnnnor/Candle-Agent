@@ -1,16 +1,28 @@
 import type { ButtonHTMLAttributes } from "react";
 
-type Variant = "default" | "primary" | "ghost" | "active";
+type Variant =
+  | "default"  // secondary: visible but quiet
+  | "primary"  // the one filled action
+  | "danger"   // primary action in its stop state
+  | "toggle"   // state, off
+  | "active"   // state, on
+  | "ghost";   // icon-only / lowest weight
 
 const VARIANTS: Record<Variant, string> = {
   default:
-    "border-border bg-panel text-text hover:border-muted/60 hover:bg-grid",
+    "bg-ctl border border-ctl-border text-ctl-text " +
+    "hover:bg-ctl-hover hover:border-ctl-border-hover hover:text-text",
   primary:
-    "border-bull/60 bg-bull/15 text-bull hover:bg-bull/25 hover:border-bull",
-  ghost:
-    "border-transparent bg-transparent text-muted hover:text-text hover:bg-panel",
+    "bg-bull border-0 font-medium text-base hover:bg-bull-hover",
+  danger:
+    "bg-bear border-0 font-medium text-base hover:bg-bear/90",
+  toggle:
+    "bg-transparent border border-ctl-border text-muted " +
+    "hover:border-ctl-border-hover hover:text-ctl-text",
   active:
-    "border-bull bg-bull/20 text-bull",
+    "bg-bull/12 border border-bull text-bull hover:bg-bull/20",
+  ghost:
+    "bg-transparent border-0 text-muted hover:bg-ctl hover:text-text",
 };
 
 interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -26,8 +38,9 @@ export default function Button({
     <button
       {...rest}
       className={[
-        "lbl inline-flex h-8 shrink-0 items-center justify-center gap-2 rounded-md border px-3 transition-colors",
-        "disabled:cursor-not-allowed disabled:opacity-40",
+        "inline-flex h-[34px] shrink-0 items-center justify-center gap-2",
+        "rounded-lg px-3 font-mono text-[13px] tracking-[0.12em] uppercase",
+        "transition-colors disabled:cursor-not-allowed disabled:opacity-40",
         "focus-visible:ring-1 focus-visible:ring-muted focus-visible:outline-none",
         VARIANTS[variant],
         className,

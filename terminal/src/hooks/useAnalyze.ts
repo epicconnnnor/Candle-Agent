@@ -2,18 +2,22 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * The Analyze button is the status indicator - there is no separate spinner.
- * idle -> preparing -> analyzing -> idle, and a click mid-run aborts.
+ * The label cycles Analyze -> Preparing... -> Analyzing... -> Stop, and the
+ * button is filled bull while idle, bear for every running phase. Clicking
+ * at any point during a run aborts it.
  */
-export type Phase = "idle" | "preparing" | "analyzing";
+export type Phase = "idle" | "preparing" | "analyzing" | "cancellable";
 
 const LABEL: Record<Phase, string> = {
   idle: "Analyze",
   preparing: "Preparing...",
   analyzing: "Analyzing...",
+  cancellable: "Stop",
 };
 
-const PREPARING_MS = 900;
-const ANALYZING_MS = 2400;
+const PREPARING_MS = 700;
+const ANALYZING_MS = 1800;
+const CANCELLABLE_MS = 1500;
 
 export function useAnalyze(onComplete: () => void) {
   const [phase, setPhase] = useState<Phase>("idle");
@@ -35,13 +39,13 @@ export function useAnalyze(onComplete: () => void) {
     setPhase("preparing");
     timers.current.push(
       window.setTimeout(() => setPhase("analyzing"), PREPARING_MS),
+      window.setTimeout(() => setPhase("cancellable"), PREPARING_MS + ANALYZING_MS),
       window.setTimeout(() => {
         setPhase("idle");
         onComplete();
-      }, PREPARING_MS + ANALYZING_MS)
+      }, PREPARING_MS + ANALYZING_MS + CANCELLABLE_MS)
     );
   }, [phase, clear, onComplete]);
 
-  // running label is "Stop" on hover-intent; the raw phase label otherwise
   return { phase, label: LABEL[phase], running: phase !== "idle", toggle };
 }
