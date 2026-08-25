@@ -12,7 +12,7 @@ import time
 
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
-from .. import bus, config, db
+from .. import bus, config
 from ..metrics import (ANALYSES, ANALYSIS_FAILURES, BUS_REDELIVERIES,
                        LLM_LATENCY, serve_metrics)
 from ..orchestrator import analyze
