@@ -1,5 +1,7 @@
 # Candle Agent
 
+![Cover](image/Candle-Agent.png)
+
 📈 I built this to answer a question I kept asking myself while staring at charts: what is this market actually doing right now?
 
 It pulls live candle data, hands it to an LLM in two stages, and streams the answer to your browser as it thinks.
