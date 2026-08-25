@@ -1,132 +1,109 @@
-# candle-agent
+# Candle Agent
 
-[![CI](https://github.com/epicconnnnor/Candle-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/epicconnnnor/Candle-Agent/actions/workflows/ci.yml)
+📈 I built this to answer a question I kept asking myself while staring at charts: what is this market actually doing right now?
 
-Event-driven microservices pipeline: streams live market bars, computes
-bar-geometry features locally, runs a **two-stage LLM analysis**
-(market diagnosis �?strategy routing �?schema-validated trade decision),
-and pushes results to a live web chart over SSE.
+It pulls live candle data, hands it to an LLM in two stages, and streams the answer to your browser as it thinks.
 
-**Analysis only �?this never places orders.**
+It does not place trades. It doesn't touch your broker. It just tells you what it sees.
+
+---
+
+## What it does
+
+🕯️ Pulls candles from live market data sources
+🧠 Runs a two-stage analysis — first diagnose the market, then decide on a trade
+🛡️ Checks every response the model gives back, and retries when it's malformed
+📡 Pushes results to the browser over SSE as they land
+📊 Draws the entry, stop, and target right on the chart
+
+---
+
+## Why two stages
+
+I tried doing it in one prompt first. The model would jump straight to "buy here" without ever establishing what kind of market it was looking at, and the answers were all over the place.
+
+So I split it:
+
+**Stage 1** just describes the market. Cycle phase, trend structure, key levels, how confident it is. No trade talk allowed.
+
+**Stage 2** reads that diagnosis and decides what to do about it. Entry, stop, target, and why. Or it says don't trade, which is a valid answer and happens often.
+
+Separating them made the output far more stable. Stage 2 can't hallucinate a setup that contradicts stage 1, because stage 1 already committed to a description.
+
+Both stages return strict JSON. If the model returns something broken, I repair it or retry before it ever reaches your screen — that validation layer ended up being a surprising amount of the code.
+
+---
+
+## How it's put together
 
 ```
-                 ┌──────────┐   bars.closed.*    ┌────────────┐
- Binance ─wss──► │  ingest  │ ──────────────────►│  analyzer  │──► LLM (2-stage)
- (or demo gen)   └────┬─────┘   NATS JetStream   └─────┬──────┘    + JSON schema
-                      │        (at-least-once,         │           + consistency gates
-                      │         durable consumer)      │ analysis.completed.*
-                      ▼                                ▼
-                   SQLite ◄───────────────────── ┌──────────┐   SSE    ┌─────────┐
-                   (WAL)                         │   api    │ ───────► │ browser │
-                                                 └──────────┘          └─────────┘
+data source ──▶ ingest ──▶ NATS JetStream ──▶ analysis ──▶ SSE ──▶ browser
+                                │                 │
+                                ▼                 ▼
+                             SQLite          Prometheus
 ```
 
-Three independently deployable services sharing one image:
+This started as one big Python script. I broke it apart because a slow LLM call was blocking data ingestion, and I wanted to be able to restart the analysis service without dropping candles.
 
-| service    | job                                                        | metrics |
-|------------|------------------------------------------------------------|---------|
-| `ingest`   | persistent TLS websocket to Binance; reconnect w/ exponential backoff + full jitter; publishes each closed bar | :9101 |
-| `analyzer` | durable JetStream pull consumer; two-stage LLM pipeline; explicit ACK after persist | :9102 |
-| `paper`    | forward paper trading: simulates fills/stops/targets against live bars; crash-safe (recovers open positions from DB) | :9103 |
-| `api`      | REST + SSE fan-out; k8s-style `/healthz`; Prometheus `/metrics` | :8000 |
+Now each piece runs in its own container and talks only through NATS. Nothing shares a database connection.
 
-## Quickstart (offline demo �?zero keys, zero market data)
+---
+
+## Stack
+
+| Layer | What I used |
+|---|---|
+| Services | Python |
+| Messaging | NATS JetStream |
+| Storage | SQLite (WAL) |
+| Transport | Server-Sent Events |
+| Metrics | Prometheus |
+| Frontend | React, TypeScript, Vite, Tailwind |
+| Charting | lightweight-charts |
+| Packaging | Docker |
+| CI | GitHub Actions |
+
+---
+
+## Try it
 
 ```bash
-docker compose up --build
-# http://localhost:8000  �?live chart, synthetic bar every 3s, mock LLM
-# http://localhost:8222  �?NATS monitoring
+git clone https://github.com/epicconnnnor/Candle-Agent.git
+cd Candle-Agent
+cp .env.example .env     # drop your API key in here
+docker compose up
 ```
 
-## Live mode
+Then the frontend:
 
 ```bash
-cp .env.example .env      # set INGEST_MODE=live, LLM_PROVIDER=openai_compat + key
-docker compose up --build
+cd frontend
+npm install
+npm run dev
 ```
 
-Any OpenAI-compatible provider works (DeepSeek, OpenRouter, Groq, OpenAI):
-`LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`.
-
-## Kill a service, lose nothing
-
-```bash
-docker compose kill analyzer     # bars keep arriving, pile up in JetStream
-sleep 15
-docker compose start analyzer    # backlog is redelivered and drained
-```
-
-The analyzer only ACKs a bar after its analysis is stored. Un-ACKed
-messages are redelivered (`ack_wait=120s`), so a crash mid-analysis is
-retried �?on a peer replica if you've scaled out:
-
-```bash
-docker compose up --scale analyzer=3    # JetStream load-balances the durable consumer
-```
-
-## Paper trading (forward test, zero execution risk)
-
-The `paper` service turns the analyzer's calls into simulated trades:
-
-- limit/stop orders fill when a live bar's range touches the entry;
-  market orders fill at next open; unfilled orders expire after 20 bars
-- open positions are checked for stop/target every bar; **pessimistic
-  same-bar rule**: if one bar covers both, the stop is assumed first
-- one trade per symbol; a newer signal replaces a *pending* order but
-  never touches an *open* position
-- results in R-multiples + fixed-$-risk P&L (`RISK_PER_TRADE`, default $100)
-- `GET /api/paper/BTCUSDT` �?active position, history, win rate, total R
-- fills are frictionless (no fees/slippage) �?a known limitation
-
-The fill logic is pure functions (`candle_agent/paper.py`), so the
-future backtest harness replays historical bars through the exact same
-code that runs live.
-
-## Design decisions
-
-- **Numbers, not screenshots.** The LLM receives a text table of bars +
-  precomputed features (EMA20, ATR14, inside/outside bars, breakout
-  follow-through). Deterministic, cheap, nothing to hallucinate.
-- **Two-stage with routing.** Stage 1 diagnoses the regime; the regime
-  selects a strategy playbook prompt (trend vs range) for stage 2.
-- **Trust nothing.** Every LLM response is validated against a JSON
-  schema *and* consistency gates (a long whose stop is above entry is
-  rejected). Invalid output is retried with the error fed back; after
-  `MAX_DELIVER` bus redeliveries the message is TERMed (poison-message
-  handling).
-- **no_trade is a first-class answer.** The gates force it when the
-  risk/reward math doesn't work.
-- **Event-driven end to end.** Even the UI's "Run analysis" button just
-  publishes `analysis.request.*`; the result arrives over SSE like any
-  other bus event. The API service never runs the LLM.
-- **12-factor.** One image, config via env only; no start-order
-  assumptions (services retry the bus at startup).
-
-## Networking & infra concepts on display
-
-TLS websockets w/ ping-pong half-open detection · exponential backoff w/
-full jitter · pub/sub + durable consumers + at-least-once delivery +
-explicit ACK/NAK/TERM · idempotent consumers (dedupe on bar ts) ·
-one-way-delay measurement (`ma_ingest_lag_seconds`) · SSE fan-out ·
-DNS-based service discovery in compose/k8s · liveness probes ·
-Prometheus counters/histograms per service · SQLite WAL for
-multi-process concurrency.
+---
 
 ## Tests
 
 ```bash
-pytest        # 19 tests: features, pipeline, consistency gates, fill simulation
+pytest
+ruff check .
 ```
 
-## Roadmap
+CI runs pytest, ruff, an encoding check, and a full compose build with health checks on every push.
 
-- [ ] Prometheus + Grafana containers, dashboard JSON, SLO alert rules
-- [ ] Kubernetes manifests (probes, HPA on analyzer, NetworkPolicies)
-- [ ] Backtest harness: replay historical bars, score the agent's calls
-- [ ] Multi-model comparison (DeepSeek vs Claude vs Llama)
-- [ ] Terraform: VPC + EC2/k3s on AWS
+---
 
-## Disclaimer
+## What's next
 
-Educational project. Not financial advice. The author is fully aware an
-LLM reading candles will not beat the market �?that's not the point.
+- [ ] Get it onto AWS — ECS Fargate, ALB, Secrets Manager
+- [ ] Swap SQLite for Postgres
+- [ ] Run history, and shareable links to a past analysis
+- [ ] Replay mode so I can backtest the agent against old data
+
+---
+
+## License
+
+MIT

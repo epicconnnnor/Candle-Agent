@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+@theme {
+  --color-base: #0e1116;
+  --color-panel: #131923;
+  --color-grid: #181d25;
+  --color-border: #1e242e;
+  --color-text: #e8eaed;
+  --color-muted: #6b7686;
+  --color-bull: #26a69a;
+  --color-bear: #ef5350;
+  --color-support: #1e8e7e;
+  --color-resist: #c0392b;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-base);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+  }
+  /* every numeric cell: fixed-width digits so values never jitter on update */
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+  /* the one small-label voice */
+  .lbl {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--color-muted);
+  }
+}
