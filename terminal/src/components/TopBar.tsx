@@ -39,37 +39,26 @@ export default function TopBar(p: Props) {
         Fetch data
       </Button>
       <Button
-        variant="primary"
+        variant={p.phase === "idle" ? "primary" : "danger"}
         onClick={p.onAnalyze}
         aria-label={p.phase === "idle" ? "Run analysis" : "Stop analysis"}
-        className={p.phase !== "idle" ? "group" : ""}
       >
-        {p.phase === "idle" ? (
-          <>
-            <Sparkles size={16} />
-            {p.analyzeLabel}
-          </>
-        ) : (
-          <>
-            <span className="flex items-center gap-2 group-hover:hidden">
-              <Sparkles size={16} />
-              {p.analyzeLabel}
-            </span>
-            <span className="hidden items-center gap-2 group-hover:flex">
-              <Square size={16} />
-              Stop
-            </span>
-          </>
-        )}
+        {p.analyzeLabel === "Stop" ? <Square size={16} /> : <Sparkles size={16} />}
+        {p.analyzeLabel}
       </Button>
       <Button onClick={p.onIncremental}>
         <RefreshCw size={16} />
         Incremental
       </Button>
-      <Button variant={p.live ? "active" : "default"} onClick={p.onToggleLive}>
+      <Button variant={p.live ? "active" : "toggle"} onClick={p.onToggleLive}>
         <Radio size={16} />
+        {p.live && (
+          <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-bull" />
+        )}
         Live {p.live ? "on" : "off"}
       </Button>
+      <div className="mx-1 h-5 w-px bg-border" />
+
       <Button variant="ghost" onClick={p.onSettings} aria-label="Settings" className="px-2">
         <Settings size={16} />
       </Button>
