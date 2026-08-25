@@ -5,6 +5,7 @@ interface Props {
   label: string;
 }
 
+/** Matches the secondary button treatment so the toolbar reads as one row. */
 export default function Select({ value, options, onChange, label }: Props) {
   return (
     <label className="flex items-center gap-2">
@@ -13,8 +14,10 @@ export default function Select({ value, options, onChange, label }: Props) {
         value={value}
         aria-label={label}
         onChange={(e) => onChange(e.target.value)}
-        className="lbl h-8 rounded-md border border-border bg-panel px-2 pr-6 text-text
-                   hover:border-muted/60 focus-visible:ring-1 focus-visible:ring-muted
+        className="h-[34px] rounded-lg border border-ctl-border bg-ctl px-3 pr-7
+                   font-mono text-[13px] tracking-[0.12em] text-ctl-text uppercase
+                   transition-colors hover:border-ctl-border-hover hover:bg-ctl-hover
+                   hover:text-text focus-visible:ring-1 focus-visible:ring-muted
                    focus-visible:outline-none"
       >
         {options.map((o) => (

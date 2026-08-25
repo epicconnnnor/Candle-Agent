@@ -12,6 +12,14 @@
   --color-support: #1e8e7e;
   --color-resist: #c0392b;
 
+  /* control surfaces - neutral steps, not new hues */
+  --color-bull-hover: #2fbbad;
+  --color-ctl: #1a2230;
+  --color-ctl-hover: #222c3c;
+  --color-ctl-border: #2a3444;
+  --color-ctl-border-hover: #3a4658;
+  --color-ctl-text: #b4bcc8;
+
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
