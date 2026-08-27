@@ -90,6 +90,21 @@ CORS_ORIGINS = [
     ).split(",") if o.strip()
 ]
 
+# --- llm ---
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "mock").lower()
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+
+# --- bring-your-own-key + abuse control ---
+# Visitors may send their own LLM key in an X-LLM-Key header. It is used
+# for that one request and never stored. These govern the guard rails.
+RATE_LIMIT_PER_HOUR = int(os.environ.get("RATE_LIMIT_PER_HOUR", "60"))  # 0 = off
+# only honour X-Forwarded-* when something trusted actually sets them
+TRUST_PROXY_HEADERS = os.environ.get("TRUST_PROXY_HEADERS", "false").lower() == "true"
+# a key must not cross plain HTTP; loopback is exempt so local dev works
+ALLOW_INSECURE_KEY_HEADER = (
+    os.environ.get("ALLOW_INSECURE_KEY_HEADER", "false").lower() == "true"
+)
+
 # analyzer
 ANALYZE_EVERY = int(os.environ.get("ANALYZE_EVERY", "1"))  # every Nth bar
 MIN_BARS = int(os.environ.get("MIN_BARS", "30"))

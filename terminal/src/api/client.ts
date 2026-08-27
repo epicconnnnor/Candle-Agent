@@ -12,6 +12,8 @@ import type {
   BarRow,
   ConnectionState,
   IngestStatus,
+  InlineAnalysis,
+  KeyTestResult,
   PaperUpdate,
   SseEnvelope,
   StoredAnalysis,
@@ -34,6 +36,17 @@ export class ApiError extends Error {
     this.name = "ApiError";
   }
 }
+
+/**
+ * Attach a visitor's LLM key to one request.
+ *
+ * A header, never a query string: URLs land in browser history, proxy
+ * logs and server access logs. The key is held in React state only - it
+ * is never written to localStorage, sessionStorage or a cookie, and is
+ * gone on reload. There is deliberately no "remember my key".
+ */
+const keyHeader = (key?: string | null): Record<string, string> =>
+  key ? { "X-LLM-Key": key } : {};
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
@@ -104,9 +117,25 @@ export const getAnalysis = async (symbol: string): Promise<StoredAnalysis | null
   }
 };
 
-/** 202: the analyzer picks the request up, the result arrives over SSE. */
-export const requestAnalysis = (symbol: string) =>
-  request<AnalyzeQueued>(`/api/analyze/${encodeURIComponent(symbol)}`, { method: "POST" });
+/**
+ * Queue or run an analysis.
+ *
+ * Without a key: 202, the analyzer picks it up and the result arrives over
+ * SSE. With a visitor key the backend runs it inline and returns the
+ * finished analysis, because a key must never ride the persisted bus.
+ */
+export const requestAnalysis = (symbol: string, apiKey?: string | null) =>
+  request<AnalyzeQueued | InlineAnalysis>(
+    `/api/analyze/${encodeURIComponent(symbol)}`,
+    { method: "POST", headers: keyHeader(apiKey) },
+  );
+
+/** Minimal upstream call to tell a good key from a bad one. */
+export const testKey = (apiKey: string) =>
+  request<KeyTestResult>("/api/llm/test", {
+    method: "POST",
+    headers: keyHeader(apiKey),
+  });
 
 // --- SSE ----------------------------------------------------------------
 

@@ -132,6 +132,24 @@ export interface AnalyzeQueued {
   symbol: string;
 }
 
+/** POST /api/analyze/{symbol} with X-LLM-Key - runs inline, returns 200. */
+export interface InlineAnalysis {
+  status: "completed";
+  symbol: string;
+  key_source: "user";
+  stage1: Stage1;
+  stage2: Stage2;
+  model: string;
+  latency_ms: number;
+}
+
+/** POST /api/llm/test */
+export interface KeyTestResult {
+  valid: boolean;
+  model: string;
+  detail: string;
+}
+
 // --- SSE (GET /api/events) ---------------------------------------------
 
 /** analysis.completed.<SYMBOL> */

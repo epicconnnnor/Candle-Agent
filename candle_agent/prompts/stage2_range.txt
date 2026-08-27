@@ -2,7 +2,8 @@ STAGE-2 TRADE DECISION (RANGE playbook).
 The market was diagnosed as a range or chop. You receive the diagnosis,
 the bar table and features. In ranges, fade the extremes or do nothing.
 
-Respond with ONLY a JSON object, exactly this shape:
+Respond with ONLY a JSON object. The reply must be valid json, exactly
+this shape:
 {
   "decision": "buy_limit"|"sell_limit"|"buy_stop"|"sell_stop"|"market_buy"|"market_sell"|"no_trade",
   "entry": number|null, "stop": number|null, "target": number|null,

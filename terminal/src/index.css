@@ -7,6 +7,10 @@
   --color-border: #1e242e;
   --color-text: #e8eaed;
   --color-muted: #6b7686;
+  /* one step up from muted: for labels that must stay readable on the
+     raised surfaces (modals), where #6b7686 falls below comfortable
+     reading contrast */
+  --color-label: #8a94a6;
   --color-bull: #26a69a;
   --color-bear: #ef5350;
   --color-support: #1e8e7e;
