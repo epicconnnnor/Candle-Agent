@@ -28,6 +28,19 @@
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+@layer utilities {
+  /* indeterminate progress for a stage that is running: a sweep, not a
+     percentage, because we do not know how far through a stage is */
+  @keyframes track-sweep {
+    0%   { width: 0%; }
+    70%  { width: 92%; }
+    100% { width: 92%; }
+  }
+  .track-sweep {
+    animation: track-sweep 2.4s ease-out infinite;
+  }
+}
+
 @layer base {
   body {
     background-color: var(--color-base);

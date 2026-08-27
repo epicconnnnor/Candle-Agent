@@ -17,6 +17,7 @@ from ..metrics import (ANALYSES, ANALYSIS_FAILURES, BUS_REDELIVERIES,
                        LLM_LATENCY, serve_metrics)
 from ..orchestrator import analyze
 
+_nc = None                        # core connection, for progress events
 _bar_counts: dict[str, int] = {}   # per-symbol bars seen (for ANALYZE_EVERY)
 _last_analyzed: dict[str, int] = {}  # per-symbol last analyzed bar ts (idempotency)
 
@@ -29,6 +30,21 @@ def _should_analyze(symbol: str, ts: int, forced: bool) -> bool:
     n = _bar_counts.get(symbol, 0) + 1
     _bar_counts[symbol] = n
     return n % config.ANALYZE_EVERY == 0
+
+
+def _progress_emitter(loop, symbol: str):
+    """A sync callback usable from the worker thread analyze() runs in.
+
+    run_coroutine_threadsafe is the bridge: analyze() is blocking and lives
+    off-loop, but the publish has to happen on it.
+    """
+    def emit(name: str, payload: dict):
+        template = bus.PROGRESS_SUBJECTS.get(name)
+        if template is None or _nc is None:
+            return
+        asyncio.run_coroutine_threadsafe(
+            bus.publish_core(_nc, template.format(symbol=symbol), payload), loop)
+    return emit
 
 
 async def _handle(js, msg, forced: bool):
@@ -48,7 +64,8 @@ async def _handle(js, msg, forced: bool):
         t0 = time.time()
         # analyze() is sync (blocking LLM HTTP calls) -> run in a thread so
         # the event loop keeps servicing heartbeats and other messages.
-        result = await asyncio.to_thread(analyze, symbol, config.MIN_BARS)
+        emit = _progress_emitter(asyncio.get_running_loop(), symbol)
+        result = await asyncio.to_thread(analyze, symbol, config.MIN_BARS, None, emit)
         LLM_LATENCY.observe(time.time() - t0)
         _last_analyzed[symbol] = ts
         ANALYSES.labels(symbol=symbol,
@@ -86,8 +103,11 @@ async def _consume(js, subject: str, durable: str, forced: bool):
 
 
 async def main():
+    global _nc
+
     serve_metrics()
     nc, js = await bus.connect()
+    _nc = nc
     print(f"[analyzer] bus connected {config.NATS_URL}, analyze_every={config.ANALYZE_EVERY}")
     await asyncio.gather(
         _consume(js, "bars.closed.>", "analyzers-bars", forced=False),

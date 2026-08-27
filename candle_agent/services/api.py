@@ -48,6 +48,9 @@ async def lifespan(app):
         # connection state from ingest: a 451 or a bad symbol has to reach
         # the browser, not just the ingest log
         await nc.subscribe("ingest.status.>", cb=_fanout),
+        # pipeline progress, so stage 1 and stage 2 move independently
+        await nc.subscribe("snapshot.built.>", cb=_fanout),
+        await nc.subscribe("analysis.stage1.completed.>", cb=_fanout),
     ]
     print(f"[api] bus connected {config.NATS_URL}")
     print(f"[api] sources: {', '.join(sources.names())}")
@@ -278,9 +281,18 @@ async def trigger(request: Request, symbol: str,
     except LLMKeyRequired as e:
         raise HTTPException(400, str(e)) from None
 
+    loop = asyncio.get_running_loop()
+
+    def emit(name: str, payload: dict):
+        template = bus.PROGRESS_SUBJECTS.get(name)
+        if template is not None:
+            asyncio.run_coroutine_threadsafe(
+                bus.publish_core(_state["nc"], template.format(symbol=symbol), payload),
+                loop)
+
     try:
         # blocking HTTP inside; keep the event loop free
-        result = await asyncio.to_thread(analyze, symbol, config.MIN_BARS, llm)
+        result = await asyncio.to_thread(analyze, symbol, config.MIN_BARS, llm, emit)
     except LLMAuthFailed as e:
         raise HTTPException(400, security.scrub(e, x_llm_key)) from None
     except LLMUpstreamError as e:

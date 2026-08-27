@@ -11,6 +11,8 @@ import LevelsCard from "./components/LevelsCard";
 import ChatPanel from "./components/ChatPanel";
 import SettingsModal from "./components/SettingsModal";
 import StatusBanner from "./components/StatusBanner";
+import PipelineStrip, { type Stage } from "./components/PipelineStrip";
+import MarketSummaryStrip from "./components/MarketSummaryStrip";
 import Button from "./components/ui/Button";
 import Card from "./components/ui/Card";
 import { useAnalyze } from "./hooks/useAnalyze";
@@ -170,6 +172,65 @@ export default function App() {
 
   const problem = fault ?? feed.notices.problem;
 
+  /**
+   * Pipeline stages, driven only by signals that actually exist:
+   * bars.closed, ingest.status, snapshot.built,
+   * analysis.stage1.completed and analysis.completed.
+   *
+   * The chat cell has no backend and still says so.
+   */
+  const analysing = analyze.phase !== "idle";
+  const prog = feed.progress;
+  const marketClosed = Boolean(feed.notices.market);
+
+  const dataStage: Stage = problem
+    ? { name: "Data", state: "error", status: problem.message ?? "feed error" }
+    : bars.length === 0
+      ? { name: "Data", state: "waiting", status: "no bars yet" }
+      : marketClosed
+        ? { name: "Data", state: "done", status: `${bars.length} bars · market closed` }
+        : feed.barEvents > 0
+          // only an actual bar event proves data is flowing; a connected
+          // socket on its own does not
+          ? { name: "Data", state: "running", status: `${bars.length} bars · streaming` }
+          : { name: "Data", state: "done", status: `${bars.length} bars · history only` };
+
+  const snapshotStage: Stage =
+    prog.snapshotAt !== null
+      ? { name: "Snapshot", state: "done", status: `${prog.bars ?? "?"} bars packaged` }
+      : analysing
+        ? { name: "Snapshot", state: "running", status: "building feature packet" }
+        : { name: "Snapshot", state: "idle", status: "awaiting next run" };
+
+  const diagnosisStage: Stage =
+    prog.stage1At !== null
+      ? { name: "Diagnosis", state: "done",
+          status: feed.analysis ? feed.analysis.stage1.regime.replace("_", " ") : "validated" }
+      : prog.snapshotAt !== null
+        // snapshot landed, stage 1 has not: it is running right now
+        ? { name: "Diagnosis", state: "running", status: "stage 1 running" }
+        : feed.analysis
+          ? { name: "Diagnosis", state: "done", status: feed.analysis.stage1.regime.replace("_", " ") }
+          : { name: "Diagnosis", state: "idle", status: "no analysis yet" };
+
+  const decisionStage: Stage =
+    prog.completedAt !== null && feed.analysis
+      ? { name: "Decision", state: "done",
+          status: `${feed.analysis.stage2.decision.replace("_", " ")} · ${feed.analysis.latency_ms} ms` }
+      : prog.stage1At !== null
+        ? { name: "Decision", state: "running", status: "stage 2 running" }
+        : feed.analysis
+          ? { name: "Decision", state: "done", status: feed.analysis.stage2.decision.replace("_", " ") }
+          : { name: "Decision", state: "idle", status: "no decision yet" };
+
+  const stages: Stage[] = [
+    dataStage,
+    snapshotStage,
+    diagnosisStage,
+    decisionStage,
+    { name: "Follow-up", state: "idle", status: "local only · no backend" },
+  ];
+
   return (
     <div className="min-h-screen bg-base">
       <TopBar
@@ -210,6 +271,12 @@ export default function App() {
           problem={problem}
           market={feed.notices.market}
           backfill={feed.notices.backfill}
+        />
+
+        <PipelineStrip stages={stages} lastEventAt={feed.lastEventAt} />
+        <MarketSummaryStrip
+          stage1={feed.analysis?.stage1 ?? null}
+          lastClose={last?.close ?? null}
         />
 
         {/* main column and sidebar at 2:1; the sidebar stacks below 1100px */}

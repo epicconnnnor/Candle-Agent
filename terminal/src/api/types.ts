@@ -166,6 +166,23 @@ export interface AnalysisCompleted {
   latency_ms: number;
 }
 
+/** snapshot.built.<SYMBOL> - the feature packet is ready. */
+export interface SnapshotBuilt {
+  symbol: string;
+  interval: string;
+  bars: number;
+  first_ts: number;
+  last_ts: number;
+}
+
+/** analysis.stage1.completed.<SYMBOL> - diagnosis validated, before stage 2. */
+export interface Stage1Completed {
+  symbol: string;
+  interval: string;
+  bar_ts: number;
+  stage1: Stage1;
+}
+
 /** bars.closed.<SYMBOL> - the bar dict with `symbol` merged in. */
 export interface BarClosed {
   symbol: string;
