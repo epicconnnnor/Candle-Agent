@@ -26,6 +26,8 @@ const FAULTS = new Set(["failed", "error", "unhealthy", "stalled", "backfill_fai
 interface Feed {
   bars: Bar[];
   analysis: AnalysisCompleted | null;
+  /** Last close at the moment the analysis arrived, for staleness. */
+  analysisPrice: number | null;
   connection: ConnectionState;
   notices: Notices;
   /** Replace the series wholesale - used by a subscribe. */
@@ -43,11 +45,13 @@ interface Feed {
 export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
   const [bars, setBars] = useState<Bar[]>([]);
   const [analysis, setAnalysis] = useState<AnalysisCompleted | null>(null);
+  const [analysisPrice, setAnalysisPrice] = useState<number | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [notices, setNotices] = useState<Notices>(EMPTY);
 
   // read inside the SSE callbacks without re-opening the stream on change
   const symbolRef = useRef(symbol);
+  const lastCloseRef = useRef<number | null>(null);
   const barCb = useRef(onBar);
   useEffect(() => {
     symbolRef.current = symbol;
@@ -71,8 +75,13 @@ export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
   }, []);
 
   const reset = useCallback((rows: BarRow[], next?: AnalysisCompleted | null) => {
-    setBars(rows.map(toBar));
-    if (next !== undefined) setAnalysis(next);
+    const mapped = rows.map(toBar);
+    setBars(mapped);
+    lastCloseRef.current = mapped.length ? mapped[mapped.length - 1].close : null;
+    // A new series means any previous analysis describes a different market.
+    // Clearing it here is what pulls the old price lines off the chart.
+    setAnalysis(next ?? null);
+    setAnalysisPrice(next ? lastCloseRef.current : null);
     setNotices(EMPTY);
   }, []);
 
@@ -81,11 +90,15 @@ export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
       onConnection: setConnection,
       onStatus: applyStatus,
       onAnalysis: (a) => {
-        if (a.symbol === symbolRef.current) setAnalysis(a);
+        if (a.symbol !== symbolRef.current) return;
+        setAnalysis(a);
+        // the market price this verdict was formed against
+        setAnalysisPrice(lastCloseRef.current);
       },
       onBar: (raw) => {
         if (raw.symbol !== symbolRef.current) return;
         const bar = toBar(raw);
+        lastCloseRef.current = bar.close;
         barCb.current?.(bar);           // incremental series.update()
         setBars((current) => {
           const last = current[current.length - 1];
@@ -106,5 +119,5 @@ export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
     return dispose;
   }, [applyStatus]);
 
-  return { bars, analysis, connection, notices, reset, applyStatus };
+  return { bars, analysis, analysisPrice, connection, notices, reset, applyStatus };
 }

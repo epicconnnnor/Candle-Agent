@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { ArrowUp, Trash2 } from "lucide-react";
 import Button from "./ui/Button";
+import Card from "./ui/Card";
 import type { ChatMessage } from "../types";
 
 const CANNED = [
@@ -28,49 +29,55 @@ export default function ChatPanel() {
   };
 
   return (
-    <section className="rounded-lg border border-border bg-panel">
-      <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-        <span className="lbl">Follow-up</span>
+    <Card
+      title="Follow-up"
+      action={
         <Button variant="ghost" onClick={() => setMessages([])} disabled={!messages.length}>
           <Trash2 size={16} />
           Clear
         </Button>
-      </div>
-
-      <div className="max-h-56 min-h-24 overflow-y-auto px-4 py-3">
+      }
+    >
+      <div className="max-h-56 min-h-20 overflow-y-auto">
         {messages.length === 0 ? (
-          <p className="text-[13px] text-muted">
+          <p className="font-sans text-[13px] leading-snug text-muted">
             Ask about the current diagnosis, the levels, or what would invalidate it.
           </p>
         ) : (
           <ul className="flex flex-col gap-3">
             {messages.map((m) => (
               <li key={m.id} className="flex gap-3">
-                <span className={`lbl mt-1 shrink-0 ${m.role === "agent" ? "text-bull" : ""}`}>
+                <span
+                  className={`font-sans text-[13px] shrink-0 ${
+                    m.role === "agent" ? "text-bull" : "text-muted"
+                  }`}
+                >
                   {m.role === "user" ? "You" : "Agent"}
                 </span>
-                <span className="text-[13px] leading-snug">{m.text}</span>
+                <span className="font-sans text-[13px] leading-snug text-text">{m.text}</span>
               </li>
             ))}
           </ul>
         )}
       </div>
 
-      <div className="flex items-center gap-2 border-t border-border p-3">
+      {/* the input keeps its own outline: it is a control, not a section */}
+      <div className="mt-4 flex items-center gap-2">
         <input
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && send()}
           placeholder="Ask a follow-up"
           aria-label="Follow-up message"
-          className="h-8 min-w-0 flex-1 rounded-md border border-border bg-base px-3 text-[13px]
-                     placeholder:text-muted focus-visible:border-muted focus-visible:outline-none"
+          className="h-[34px] min-w-0 flex-1 rounded-md border border-ctl-border bg-base px-3
+                     font-sans text-[13px] placeholder:text-muted
+                     focus-visible:border-muted focus-visible:outline-none"
         />
         <Button variant="primary" onClick={send} disabled={!draft.trim()}>
           <ArrowUp size={16} />
           Send
         </Button>
       </div>
-    </section>
+    </Card>
   );
 }
