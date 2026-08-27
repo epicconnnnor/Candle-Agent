@@ -20,7 +20,11 @@ const LABEL: Record<Phase, string> = {
 /** Give up waiting for an SSE result rather than spinning forever. */
 const TIMEOUT_MS = 120_000;
 
-export function useAnalyze(symbol: string, onError?: (message: string) => void) {
+export function useAnalyze(
+  symbol: string,
+  apiKey?: string,
+  onError?: (message: string) => void,
+) {
   const [phase, setPhase] = useState<Phase>("idle");
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -49,14 +53,20 @@ export function useAnalyze(symbol: string, onError?: (message: string) => void) 
     }
     setPhase("requesting");
     try {
-      await requestAnalysis(symbol);
+      const res = await requestAnalysis(symbol, apiKey);
+      if ("status" in res && res.status === "completed") {
+        // a visitor key runs inline, so the result is already here and
+        // there is no SSE event to wait for
+        setPhase("idle");
+        return;
+      }
       setPhase("analyzing");
       timer.current = setTimeout(() => setPhase("idle"), TIMEOUT_MS);
     } catch (e) {
       setPhase("idle");
       onError?.(e instanceof Error ? e.message : String(e));
     }
-  }, [phase, symbol, clear, onError]);
+  }, [phase, symbol, apiKey, clear, onError]);
 
   return { phase, label: LABEL[phase], running: phase !== "idle", toggle, settle };
 }

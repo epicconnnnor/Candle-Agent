@@ -54,7 +54,9 @@ def _call_validated(llm, system, user, schema, extra_check=None):
     raise RuntimeError(f"LLM output failed validation after retries: {last_err}")
 
 
-def analyze(symbol: str, min_bars: int = 30):
+def analyze(symbol: str, min_bars: int = 30, llm=None):
+    """`llm` defaults to the configured client; pass one to instrument the
+    call (token accounting) or to script a response in a test."""
     # recent_bars resolves to the symbol's most recently ingested interval,
     # so the analyzer never has to know which one is live
     bars = db.recent_bars(symbol, limit=100)
@@ -71,7 +73,7 @@ def analyze(symbol: str, min_bars: int = 30):
         f"Bar table (K1 = newest closed bar):\n{packet['bar_table']}"
     )
 
-    llm = get_llm()
+    llm = llm or get_llm()
     t0 = time.time()
 
     stage1 = _call_validated(llm, _prompt("stage1_diagnose.txt"), user_ctx, STAGE1_SCHEMA)

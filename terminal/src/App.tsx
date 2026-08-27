@@ -32,6 +32,10 @@ export default function App() {
   const [fault, setFault] = useState<IngestStatus | null>(null);
   const [revision, setRevision] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // The visitor's LLM key. React state ONLY: never localStorage,
+  // sessionStorage or a cookie, so a reload clears it. Deliberate - there
+  // is no "remember my key".
+  const [apiKey, setApiKey] = useState("");
 
   const chart = useRef<ChartHandle>(null);
 
@@ -39,7 +43,7 @@ export default function App() {
   const pushBar = useCallback((bar: Bar) => chart.current?.update(bar), []);
   const feed = useFeed(symbol, pushBar);
 
-  const analyze = useAnalyze(symbol, (message) =>
+  const analyze = useAnalyze(symbol, apiKey, (message) =>
     setFault({ ts: Date.now(), mode: "", state: "error", kind: "error", message }),
   );
   const { settle } = analyze;
@@ -162,6 +166,7 @@ export default function App() {
         phase={analyze.phase}
         analyzeLabel={analyze.label}
         busy={subscribing}
+        usingOwnKey={Boolean(apiKey)}
         lastPrice={last?.close ?? null}
         change={change}
         changePct={changePct}
@@ -217,7 +222,13 @@ export default function App() {
         <ChatPanel />
       </main>
 
-      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <SettingsModal
+          onClose={() => setSettingsOpen(false)}
+          apiKey={apiKey}
+          onApiKey={setApiKey}
+        />
+      )}
     </div>
   );
 }

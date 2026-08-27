@@ -12,13 +12,15 @@ import json
 import pathlib
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from prometheus_client import make_asgi_app
 from pydantic import BaseModel, Field
 
-from .. import bus, config, db, intervals, sources, symbols
+from .. import bus, config, db, intervals, security, sources, symbols
+from ..llm import (LLMAuthFailed, LLMKeyRequired, LLMUpstreamError, get_llm)
+from ..orchestrator import analyze
 from ..paper import summarize
 from ..metrics import SSE_CLIENTS
 
@@ -66,8 +68,44 @@ app.add_middleware(
     allow_origins=config.CORS_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["*"],
+    # X-LLM-Key must be listed or the browser will not send it cross-origin
+    allow_headers=["Content-Type", "X-LLM-Key"],
 )
+
+# by IP, whoever's key is in play: a visitor key protects their wallet,
+# not this server's CPU
+_limiter = security.RateLimiter(config.RATE_LIMIT_PER_HOUR)
+
+
+def _enforce_limit(request: Request):
+    ip = security.client_ip(request, config.TRUST_PROXY_HEADERS)
+    allowed, retry_after = _limiter.check(ip)
+    if not allowed:
+        raise HTTPException(
+            429,
+            f"Rate limit reached ({config.RATE_LIMIT_PER_HOUR} requests/hour). "
+            f"Try again in {retry_after}s.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+def _check_key_transport(request: Request, key: str | None):
+    """A visitor key may not cross plain HTTP.
+
+    Loopback is exempt so local development works; anything else needs TLS
+    or an explicit ALLOW_INSECURE_KEY_HEADER opt-in.
+    """
+    if not key:
+        return
+    if security.is_secure(request) or config.ALLOW_INSECURE_KEY_HEADER:
+        return
+    if security.is_loopback(request):
+        return
+    raise HTTPException(
+        400,
+        "An API key may only be sent over HTTPS. Refusing to accept "
+        "X-LLM-Key on an insecure connection.",
+    )
 
 app.mount("/metrics", make_asgi_app())
 
@@ -172,14 +210,84 @@ def latest(symbol: str):
     return a
 
 
-@app.post("/api/analyze/{symbol}", status_code=202)
-async def trigger(symbol: str):
-    """Publish a request; the analyzer picks it up. 202 = accepted, result
-    arrives asynchronously on the SSE stream."""
+@app.post("/api/llm/test")
+async def test_key(request: Request, x_llm_key: str | None = Header(default=None)):
+    """Smallest possible upstream call, to tell a good key from a bad one.
+
+    Nothing is stored and nothing is analysed; the key exists only for the
+    duration of this call.
+    """
+    _enforce_limit(request)
+    _check_key_transport(request, x_llm_key)
+
+    try:
+        llm = get_llm(api_key=x_llm_key)
+    except LLMKeyRequired as e:
+        raise HTTPException(400, str(e)) from None
+
+    try:
+        # ping() carries no response_format, so it cannot trip the
+        # "messages must contain the word json" rule
+        await asyncio.to_thread(llm.ping)
+    except LLMAuthFailed as e:
+        # already scrubbed at the client, scrubbed again on the way out
+        return {"valid": False, "model": llm.model,
+                "detail": security.scrub(e, x_llm_key)}
+    except Exception as e:                              # noqa: BLE001
+        raise HTTPException(502, security.scrub(
+            f"Could not reach the LLM provider: {e}", x_llm_key)) from None
+
+    return {"valid": True, "model": llm.model, "detail": "Key accepted."}
+
+
+@app.post("/api/analyze/{symbol}")
+async def trigger(request: Request, symbol: str,
+                  x_llm_key: str | None = Header(default=None)):
+    """Run or queue a two-stage analysis.
+
+    With a visitor key the analysis runs INLINE, in this process, and the
+    result comes straight back. It deliberately does not go through the
+    bus: JetStream persists messages to disk, so putting a key on a
+    request subject would write it down - exactly what must never happen.
+
+    Without a key the old path is unchanged: publish a request, the
+    analyzer picks it up, the result arrives over SSE (202).
+    """
+    _enforce_limit(request)
+    _check_key_transport(request, x_llm_key)
     symbol = symbol.upper()
-    await bus.publish(_state["js"], bus.ANALYSIS_REQUEST.format(symbol=symbol),
-                      {"symbol": symbol, "ts": 0})
-    return {"status": "queued", "symbol": symbol}
+
+    if not x_llm_key:
+        if config.LLM_PROVIDER == "mock" or config.LLM_API_KEY:
+            await bus.publish(_state["js"], bus.ANALYSIS_REQUEST.format(symbol=symbol),
+                              {"symbol": symbol, "ts": 0})
+            return JSONResponse({"status": "queued", "symbol": symbol}, status_code=202)
+        raise HTTPException(
+            400,
+            "An LLM API key is required. This server has none configured, so "
+            "supply your own in Settings - it is used for this request only "
+            "and never stored.")
+
+    try:
+        llm = get_llm(api_key=x_llm_key)
+    except LLMKeyRequired as e:
+        raise HTTPException(400, str(e)) from None
+
+    try:
+        # blocking HTTP inside; keep the event loop free
+        result = await asyncio.to_thread(analyze, symbol, config.MIN_BARS, llm)
+    except LLMAuthFailed as e:
+        raise HTTPException(400, security.scrub(e, x_llm_key)) from None
+    except LLMUpstreamError as e:
+        raise HTTPException(502, security.scrub(e, x_llm_key)) from None
+    except RuntimeError as e:
+        # not enough bars, or validation failed after retries
+        raise HTTPException(422, security.scrub(e, x_llm_key)) from None
+
+    # the RESULT carries no key, so it is safe to fan out like any other
+    await bus.publish(_state["js"], bus.ANALYSIS_COMPLETED.format(symbol=symbol),
+                      {"symbol": symbol, "bar_ts": 0, **result})
+    return {"status": "completed", "symbol": symbol, "key_source": "user", **result}
 
 
 @app.get("/api/paper/{symbol}")

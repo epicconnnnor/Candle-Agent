@@ -148,6 +148,47 @@ entry in the cached catalogue.
 
 ---
 
+## Bring your own key
+
+Visitors can run analyses on their own LLM credentials instead of the
+server's. The security model is the whole feature; everything else is
+plumbing.
+
+- The key lives in **React state only**. Not localStorage, not
+  sessionStorage, not a cookie, not a database, not disk. A reload clears
+  it. There is no "remember my key", by design.
+- It travels in an **`X-LLM-Key` header**, never a URL or query string —
+  URLs end up in browser history, proxy logs and access logs.
+- The backend uses it for **one upstream call** and discards it. It is
+  never written to a log, an error message, a trace, or a stored record.
+- Provider error bodies are **not forwarded** on an auth failure. They
+  echo the key back — DeepSeek returns a masked `****ghij` tail that no
+  scrubbing regex can recognise — so the body is dropped and replaced with
+  a fixed message.
+- The header is **refused over plain HTTP** unless the host is loopback
+  (for local development) or `ALLOW_INSECURE_KEY_HEADER=true`.
+
+A visitor key makes the analysis run **inline in the api process**, not
+over the bus. That is deliberate: JetStream persists messages to disk, so
+putting a key on a request subject would write it down.
+
+`tests/test_byok_security.py` asserts the key never appears in stdout,
+stderr, the response body, any database row, or any bus message after a
+real analysis — driving the actual client code, with only the outbound
+HTTP call intercepted.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RATE_LIMIT_PER_HOUR` | `60` | Per-IP cap on analyze. `0` disables. |
+| `TRUST_PROXY_HEADERS` | `false` | Honour `X-Forwarded-For`. Only behind a proxy that rewrites it — it is otherwise trivially spoofed. |
+| `ALLOW_INSECURE_KEY_HEADER` | `false` | Accept a key over plain HTTP. Never in production. |
+
+Rate limiting applies **by IP regardless of whose key is used** — a
+visitor's key protects their wallet, not this server's CPU. The counter is
+in-memory and therefore per replica.
+
+---
+
 ## Terminal
 
 The terminal reads live data only — there is no mock mode. On open it

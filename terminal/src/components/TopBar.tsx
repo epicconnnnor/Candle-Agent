@@ -1,4 +1,4 @@
-import { Radio, RefreshCw, Settings, Sparkles, Square } from "lucide-react";
+import { KeyRound, Radio, RefreshCw, Settings, Sparkles, Square } from "lucide-react";
 import Button from "./ui/Button";
 import Select from "./ui/Select";
 import SymbolPicker from "./SymbolPicker";
@@ -22,6 +22,8 @@ interface Props {
   phase: Phase;
   analyzeLabel: string;
   busy: boolean;
+  /** True when the visitor supplied their own LLM key this session. */
+  usingOwnKey: boolean;
   lastPrice: number | null;
   change: number;
   changePct: number;
@@ -71,6 +73,19 @@ export default function TopBar(p: Props) {
         <span className="lbl">Live</span>
       </span>
       <ConnectionPill state={p.connection} />
+
+      {p.usingOwnKey && (
+        <>
+          <div className="mx-1 h-5 w-px bg-border" />
+          <span
+            title="Analyses use your own API key. It is held in this tab only."
+            className="inline-flex h-[34px] shrink-0 items-center gap-1.5 px-2 text-bull"
+          >
+            <KeyRound size={14} />
+            <span className="lbl text-bull">Your key</span>
+          </span>
+        </>
+      )}
 
       <div className="mx-1 h-5 w-px bg-border" />
 

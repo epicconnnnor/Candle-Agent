@@ -85,6 +85,14 @@ services:
       ALPACA_BASE_URL: ${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
       ALPACA_DATA_URL: ${ALPACA_DATA_URL:-https://data.alpaca.markets}
       ALPACA_FEED: ${ALPACA_FEED:-iex}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      # visitor keys: rate limited by IP, HTTPS-only, never stored
+      RATE_LIMIT_PER_HOUR: ${RATE_LIMIT_PER_HOUR:-60}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
+      ALLOW_INSECURE_KEY_HEADER: ${ALLOW_INSECURE_KEY_HEADER:-false}
       # the terminal runs on its own origin, so the browser needs this
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5174,http://127.0.0.1:5174,http://localhost:4173,http://127.0.0.1:4173}
     volumes: [agent-data:/data]
