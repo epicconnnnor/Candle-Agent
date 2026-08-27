@@ -1,26 +1,45 @@
 import { useEffect, useState } from "react";
 import { FileJson, GitBranch } from "lucide-react";
 import Button from "./ui/Button";
-import type { Analysis } from "../types";
+import type { AnalysisCompleted } from "../api/types";
 
 interface Props {
-  analysis: Analysis;
+  analysis: AnalysisCompleted | null;
+  symbol: string;
+  interval: string;
 }
 
 const REPLAY_MS = 700;
+const BEARISH = new Set(["bear_trend"]);
 
-export default function Stage1Panel({ analysis }: Props) {
-  const { stage1, stage2 } = analysis;
-  const bull = stage1.bias === "bull";
+export default function Stage1Panel({ analysis, symbol, interval }: Props) {
   const [replayStep, setReplayStep] = useState(-1); // -1 = not replaying
+  const chain = analysis?.stage2.reasoning_chain ?? [];
 
   // reveal the reasoning chain one step at a time
   useEffect(() => {
-    if (replayStep < 0) return;
-    if (replayStep >= stage2.reasoning_chain.length) return;
+    if (replayStep < 0 || replayStep >= chain.length) return;
     const t = setTimeout(() => setReplayStep((s) => s + 1), REPLAY_MS);
     return () => clearTimeout(t);
-  }, [replayStep, stage2.reasoning_chain.length]);
+  }, [replayStep, chain.length]);
+
+  // a new analysis invalidates a replay in progress
+  useEffect(() => setReplayStep(-1), [analysis]);
+
+  if (!analysis) {
+    return (
+      <section className="rounded-lg border border-border border-l-2 border-l-border bg-panel p-5">
+        <span className="lbl">Stage 1 diagnosis</span>
+        <p className="mt-3 text-[13px] text-muted">
+          No analysis yet for {symbol} {interval}. Run Analyze, or wait for the
+          next closed bar.
+        </p>
+      </section>
+    );
+  }
+
+  const { stage1, stage2 } = analysis;
+  const bull = !BEARISH.has(stage1.regime);
 
   const exportJson = () => {
     const blob = new Blob([JSON.stringify(analysis, null, 2)], {
@@ -29,16 +48,18 @@ export default function Stage1Panel({ analysis }: Props) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${analysis.symbol}-${analysis.timeframe}-analysis.json`;
+    a.download = `${symbol}-${interval}-analysis.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   const stats = [
-    { label: "Cycle", value: stage1.cycle },
-    { label: "H / L count", value: `${stage1.hl_count.highs}H / ${stage1.hl_count.lows}L` },
-    { label: "EMA state", value: stage1.ema_state },
-    { label: "Confidence", value: stage1.confidence },
+    { label: "Regime", value: stage1.regime.replace("_", " ") },
+    { label: "Strength", value: stage1.strength },
+    { label: "Key levels", value: stage1.key_levels.length
+        ? stage1.key_levels.map((l) => l.toFixed(2)).join("  ")
+        : "none" },
+    { label: "Confidence", value: stage2.confidence },
   ];
 
   return (
@@ -49,20 +70,24 @@ export default function Stage1Panel({ analysis }: Props) {
     >
       <div className="flex items-start justify-between gap-4 p-5">
         <div className="min-w-0">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <span className="lbl">Stage 1 diagnosis</span>
             <span className={`lbl ${bull ? "text-bull" : "text-bear"}`}>
               {stage1.regime.replace("_", " ")} / {stage1.strength}
             </span>
+            <span className="lbl">
+              {analysis.model} · {analysis.latency_ms} ms
+            </span>
           </div>
           <h2 className="mt-3 max-w-[68ch] text-[17px] leading-snug font-medium">
-            {stage1.diagnosis}
+            {stage1.summary}
           </h2>
         </div>
         <div className="flex shrink-0 gap-2">
           <Button
             onClick={() => setReplayStep(replayStep < 0 ? 0 : -1)}
             variant={replayStep >= 0 ? "active" : "default"}
+            disabled={chain.length === 0}
           >
             <GitBranch size={16} />
             Replay decision tree
@@ -90,7 +115,7 @@ export default function Stage1Panel({ analysis }: Props) {
 
       {replayStep >= 0 && (
         <ol className="border-t border-border px-5 py-4">
-          {stage2.reasoning_chain.map((step, i) => (
+          {chain.map((step, i) => (
             <li
               key={i}
               className={`flex gap-3 py-1.5 transition-opacity duration-300 ${

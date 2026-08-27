@@ -13,6 +13,7 @@ import pathlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from prometheus_client import make_asgi_app
 from pydantic import BaseModel, Field
@@ -55,6 +56,19 @@ async def lifespan(app):
 
 
 app = FastAPI(title="candle-agent", lifespan=lifespan)
+
+# The terminal runs on its own origin in dev (vite on :5174) and from a
+# static host in production, so the browser needs explicit permission to
+# call this service at all - without it every fetch and the SSE stream
+# fail before they reach a route.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
 app.mount("/metrics", make_asgi_app())
 
 

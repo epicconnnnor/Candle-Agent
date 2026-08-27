@@ -1,51 +1,62 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { requestAnalysis } from "../api/client";
 
 /**
  * The Analyze button is the status indicator - there is no separate spinner.
- * The label cycles Analyze -> Preparing... -> Analyzing... -> Stop, and the
- * button is filled bull while idle, bear for every running phase. Clicking
- * at any point during a run aborts it.
+ * The label cycles Analyze -> Requesting... -> Analyzing... -> Stop.
+ *
+ * POST /api/analyze is fire-and-forget (202): the analyzer publishes the
+ * result on the bus and it reaches us over SSE, so `settle()` is what ends
+ * the run. Stop only detaches this button - the backend has no cancel.
  */
-export type Phase = "idle" | "preparing" | "analyzing" | "cancellable";
+export type Phase = "idle" | "requesting" | "analyzing";
 
 const LABEL: Record<Phase, string> = {
   idle: "Analyze",
-  preparing: "Preparing...",
-  analyzing: "Analyzing...",
-  cancellable: "Stop",
+  requesting: "Requesting...",
+  analyzing: "Stop",
 };
 
-const PREPARING_MS = 700;
-const ANALYZING_MS = 1800;
-const CANCELLABLE_MS = 1500;
+/** Give up waiting for an SSE result rather than spinning forever. */
+const TIMEOUT_MS = 120_000;
 
-export function useAnalyze(onComplete: () => void) {
+export function useAnalyze(symbol: string, onError?: (message: string) => void) {
   const [phase, setPhase] = useState<Phase>("idle");
-  const timers = useRef<number[]>([]);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clear = useCallback(() => {
-    timers.current.forEach(clearTimeout);
-    timers.current = [];
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
   }, []);
 
   useEffect(() => clear, [clear]);
+  useEffect(() => {
+    setPhase("idle");                 // a symbol change abandons the old run
+    clear();
+  }, [symbol, clear]);
 
-  const toggle = useCallback(() => {
+  /** Called when an analysis for this symbol arrives on the stream. */
+  const settle = useCallback(() => {
+    clear();
+    setPhase("idle");
+  }, [clear]);
+
+  const toggle = useCallback(async () => {
     if (phase !== "idle") {
       clear();
       setPhase("idle");
       return;
     }
-    setPhase("preparing");
-    timers.current.push(
-      window.setTimeout(() => setPhase("analyzing"), PREPARING_MS),
-      window.setTimeout(() => setPhase("cancellable"), PREPARING_MS + ANALYZING_MS),
-      window.setTimeout(() => {
-        setPhase("idle");
-        onComplete();
-      }, PREPARING_MS + ANALYZING_MS + CANCELLABLE_MS)
-    );
-  }, [phase, clear, onComplete]);
+    setPhase("requesting");
+    try {
+      await requestAnalysis(symbol);
+      setPhase("analyzing");
+      timer.current = setTimeout(() => setPhase("idle"), TIMEOUT_MS);
+    } catch (e) {
+      setPhase("idle");
+      onError?.(e instanceof Error ? e.message : String(e));
+    }
+  }, [phase, symbol, clear, onError]);
 
-  return { phase, label: LABEL[phase], running: phase !== "idle", toggle };
+  return { phase, label: LABEL[phase], running: phase !== "idle", toggle, settle };
 }

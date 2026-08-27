@@ -14,19 +14,9 @@ import {
   type ISeriesApi,
   type IPriceLine,
   type AutoscaleInfo,
-  type UTCTimestamp,
 } from "lightweight-charts";
 import type { Bar, Stage1, Stage2 } from "../types";
-
-const C = {
-  base: "#0E1116",
-  grid: "#181D25",
-  muted: "#6B7686",
-  bull: "#26A69A",
-  bear: "#EF5350",
-  support: "#1E8E7E",
-  resist: "#C0392B",
-};
+import { C, toCandle } from "../lib/chartTheme";
 
 /** Imperative handle so a live stream can push bars without a re-render. */
 export interface ChartHandle {
@@ -36,20 +26,16 @@ export interface ChartHandle {
 
 interface Props {
   bars: Bar[];
-  stage1: Stage1;
-  stage2: Stage2;
+  stage1: Stage1 | null;
+  stage2: Stage2 | null;
+  /** Bumped whenever the series is replaced wholesale (new symbol,
+   *  new interval, fresh backfill). Live ticks go through update()
+   *  instead, so a bar arriving never re-sets the whole series. */
+  revision: number;
 }
 
-const toCandle = (b: Bar) => ({
-  time: b.time as UTCTimestamp,
-  open: b.open,
-  high: b.high,
-  low: b.low,
-  close: b.close,
-});
-
 const Chart = forwardRef<ChartHandle, Props>(function Chart(
-  { bars, stage1, stage2 },
+  { bars, stage1, stage2, revision },
   ref
 ) {
   const host = useRef<HTMLDivElement>(null);
@@ -113,17 +99,30 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
     };
   }, []);
 
-  // full data reset when the bar set is replaced
+  // newest time currently in the series, so an out-of-order bar can be
+  // dropped rather than thrown back by lightweight-charts
+  const lastTime = useRef<number | null>(null);
+
+  // read the freshest bars without making them an effect dependency:
+  // a full setData on every tick would fight series.update()
+  const barsRef = useRef(bars);
+  barsRef.current = bars;
+
+  // full data reset only when the series is genuinely replaced
   useEffect(() => {
-    series.current?.setData(bars.map(toCandle));
+    const data = barsRef.current;
+    series.current?.setData(data.map(toCandle));
+    lastTime.current = data.length ? data[data.length - 1].time : null;
     chart.current?.timeScale().fitContent();
-  }, [bars]);
+  }, [revision]);
 
   // decision + structure levels, redrawn whenever the analysis changes
   useEffect(() => {
     const s = series.current;
     if (!s) return;
     lines.current.forEach((l) => s.removePriceLine(l));
+    lines.current = [];
+    levels.current = [];
 
     const solid = (price: number, color: string, title: string) =>
       s.createPriceLine({
@@ -144,24 +143,42 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
         title,
       });
 
-    lines.current = [
-      solid(stage2.entry, C.muted, "ENTRY"),
-      solid(stage2.stop, C.bear, "STOP"),
-      solid(stage2.target, C.bull, "TARGET"),
-      ...stage1.support.map((p, i) => dashed(p, C.support, `S${i + 1}`)),
-      ...stage1.resistance.map((p, i) => dashed(p, C.resist, `R${i + 1}`)),
+    // no_trade returns null prices, so each line is drawn only if real
+    const decision: [number | null | undefined, string, string][] = [
+      [stage2?.entry, C.muted, "ENTRY"],
+      [stage2?.stop, C.bear, "STOP"],
+      [stage2?.target, C.bull, "TARGET"],
     ];
+    const drawn = decision
+      .filter((d): d is [number, string, string] => typeof d[0] === "number")
+      .map(([price, color, title]) => solid(price, color, title));
 
+    // stage 1 reports structure as one key_levels array; colour each by
+    // which side of the last close it sits on
+    const close = barsRef.current[barsRef.current.length - 1]?.close ?? 0;
+    const structure = (stage1?.key_levels ?? []).map((price, i) =>
+      dashed(price, price <= close ? C.support : C.resist, `L${i + 1}`)
+    );
+
+    lines.current = [...drawn, ...structure];
     levels.current = [
-      stage2.entry, stage2.stop, stage2.target,
-      ...stage1.support, ...stage1.resistance,
+      ...decision.map((d) => d[0]).filter((v): v is number => typeof v === "number"),
+      ...(stage1?.key_levels ?? []),
     ];
     // price lines don't invalidate the price scale on their own
     chart.current?.priceScale("right").applyOptions({ autoScale: true });
   }, [stage1, stage2]);
 
   useImperativeHandle(ref, () => ({
-    update: (bar) => series.current?.update(toCandle(bar)),
+    update: (bar) => {
+      // A bar older than the series head is a leftover from the previous
+      // subscription, arriving in the gap between switching symbol and the
+      // new data landing. Updating with it throws "cannot update oldest
+      // data" and would leave the chart wedged.
+      if (lastTime.current !== null && bar.time < lastTime.current) return;
+      lastTime.current = bar.time;
+      series.current?.update(toCandle(bar));
+    },
     resetZoom: () => chart.current?.timeScale().fitContent(),
   }));
 

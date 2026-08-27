@@ -79,6 +79,17 @@ ALPACA_DATA_URL = _check_no_version_suffix("ALPACA_DATA_URL", ALPACA_DATA_URL)
 # symbol is not in the cached list
 DEFAULT_SOURCE = os.environ.get("DEFAULT_SOURCE", "alpaca")
 
+# api: origins allowed to call this service from a browser. The terminal
+# dev server and preview server by default; set CORS_ORIGINS (comma
+# separated, or "*") for a deployed frontend.
+CORS_ORIGINS = [
+    o.strip() for o in os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:5174,http://127.0.0.1:5174,"
+        "http://localhost:4173,http://127.0.0.1:4173",
+    ).split(",") if o.strip()
+]
+
 # analyzer
 ANALYZE_EVERY = int(os.environ.get("ANALYZE_EVERY", "1"))  # every Nth bar
 MIN_BARS = int(os.environ.get("MIN_BARS", "30"))

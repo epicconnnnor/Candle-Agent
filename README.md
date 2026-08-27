@@ -148,6 +148,29 @@ entry in the cached catalogue.
 
 ---
 
+## Terminal
+
+The terminal reads live data only — there is no mock mode. On open it
+fetches `/symbols`, subscribes to the last symbol you picked, draws the
+returned history, and then follows `/api/events`.
+
+- **Symbol picker** — searchable combobox over every symbol the sources
+  report (13k+ with Alpaca), matching on ticker or company name, grouped
+  by asset class with your last five picks pinned on top.
+- **Live updates** — the newest candle goes in via `series.update()`, so a
+  tick never re-sets the whole series.
+- **Status is visible** — every `ingest.status` event is rendered: a muted
+  banner with the next open when the market is closed, a note when the
+  backfill came back short, and a bear-coloured bar for `region_blocked`,
+  `unknown_symbol` or repeated reconnect failures. An empty chart is never
+  left unexplained.
+- **Connection state** — `connected` / `reconnecting` / `disconnected` sits
+  in the top bar; the SSE stream reconnects on its own with jittered
+  exponential backoff.
+- **Switching symbols** dims the old chart rather than blanking it.
+
+---
+
 ## Requirements
 
 | Item | Requirement |
@@ -173,11 +196,17 @@ Trading terminal:
 
 ```bash
 cd terminal
+cp .env.example .env      # optional; defaults to http://localhost:8000
 npm install
 npm run dev
 ```
 
 Open http://localhost:5174
+
+The terminal talks to the api over `VITE_API_URL` (default
+`http://localhost:8000`). Because it runs on its own origin, the api must
+allow it — that is what `CORS_ORIGINS` is for, and the default already
+covers the dev and preview servers.
 
 ---
 

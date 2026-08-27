@@ -1,23 +1,28 @@
-import { Download, Radio, RefreshCw, Settings, Sparkles, Square } from "lucide-react";
+import { Radio, RefreshCw, Settings, Sparkles, Square } from "lucide-react";
 import Button from "./ui/Button";
 import Select from "./ui/Select";
-import { SYMBOLS, TIMEFRAMES } from "../mock/data";
+import SymbolPicker from "./SymbolPicker";
+import ConnectionPill from "./ConnectionPill";
+import type { ConnectionState, SymbolInfo } from "../api/types";
 import type { Phase } from "../hooks/useAnalyze";
 
 interface Props {
   symbol: string;
-  timeframe: string;
-  onSymbol: (v: string) => void;
-  onTimeframe: (v: string) => void;
-  onFetch: () => void;
+  interval: string;
+  intervals: string[];
+  symbols: SymbolInfo[];
+  symbolsLoading: boolean;
+  symbolsError: string | null;
+  connection: ConnectionState;
+  onSymbol: (info: SymbolInfo) => void;
+  onInterval: (v: string) => void;
+  onRefresh: () => void;
   onAnalyze: () => void;
-  onIncremental: () => void;
-  onToggleLive: () => void;
   onSettings: () => void;
   phase: Phase;
   analyzeLabel: string;
-  live: boolean;
-  lastPrice: number;
+  busy: boolean;
+  lastPrice: number | null;
   change: number;
   changePct: number;
 }
@@ -29,14 +34,25 @@ export default function TopBar(p: Props) {
 
   return (
     <header className="flex flex-wrap items-center gap-2 border-b border-border bg-panel px-4 py-3">
-      <Select label="Symbol" value={p.symbol} options={SYMBOLS} onChange={p.onSymbol} />
-      <Select label="Timeframe" value={p.timeframe} options={TIMEFRAMES} onChange={p.onTimeframe} />
+      <SymbolPicker
+        symbol={p.symbol}
+        symbols={p.symbols}
+        loading={p.symbolsLoading}
+        error={p.symbolsError}
+        onSelect={p.onSymbol}
+      />
+      <Select
+        label="Interval"
+        value={p.interval}
+        options={p.intervals}
+        onChange={p.onInterval}
+      />
 
       <div className="mx-1 h-5 w-px bg-border" />
 
-      <Button onClick={p.onFetch}>
-        <Download size={16} />
-        Fetch data
+      <Button onClick={p.onRefresh} disabled={p.busy}>
+        <RefreshCw size={16} className={p.busy ? "animate-spin" : ""} />
+        {p.busy ? "Loading" : "Refresh"}
       </Button>
       <Button
         variant={p.phase === "idle" ? "primary" : "danger"}
@@ -46,17 +62,16 @@ export default function TopBar(p: Props) {
         {p.analyzeLabel === "Stop" ? <Square size={16} /> : <Sparkles size={16} />}
         {p.analyzeLabel}
       </Button>
-      <Button onClick={p.onIncremental}>
-        <RefreshCw size={16} />
-        Incremental
-      </Button>
-      <Button variant={p.live ? "active" : "toggle"} onClick={p.onToggleLive}>
-        <Radio size={16} />
-        {p.live && (
-          <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-bull" />
-        )}
-        Live {p.live ? "on" : "off"}
-      </Button>
+
+      <div className="mx-1 h-5 w-px bg-border" />
+
+      {/* live is now a property of the stream, not a local timer */}
+      <span className="inline-flex h-[34px] shrink-0 items-center gap-2 px-2">
+        <Radio size={16} className="text-muted" />
+        <span className="lbl">Live</span>
+      </span>
+      <ConnectionPill state={p.connection} />
+
       <div className="mx-1 h-5 w-px bg-border" />
 
       <Button variant="ghost" onClick={p.onSettings} aria-label="Settings" className="px-2">
@@ -64,15 +79,21 @@ export default function TopBar(p: Props) {
       </Button>
 
       <div className="ml-auto flex items-baseline gap-3">
-        <span className="num text-lg font-medium">{p.lastPrice.toFixed(2)}</span>
-        <span className={`num text-sm ${tone}`}>
-          {sign}
-          {Math.abs(p.change).toFixed(2)}
+        <span className="num text-lg font-medium">
+          {p.lastPrice != null ? p.lastPrice.toFixed(2) : "—"}
         </span>
-        <span className={`num text-sm ${tone}`}>
-          {sign}
-          {Math.abs(p.changePct).toFixed(2)}%
-        </span>
+        {p.lastPrice != null && (
+          <>
+            <span className={`num text-sm ${tone}`}>
+              {sign}
+              {Math.abs(p.change).toFixed(2)}
+            </span>
+            <span className={`num text-sm ${tone}`}>
+              {sign}
+              {Math.abs(p.changePct).toFixed(2)}%
+            </span>
+          </>
+        )}
       </div>
     </header>
   );
