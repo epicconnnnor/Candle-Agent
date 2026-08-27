@@ -1,7 +1,12 @@
 import type { Analysis, Bar, Stage1, Stage2 } from "../types";
 
-export const SYMBOLS = ["ES", "NQ", "BTCUSDT", "ETHUSDT"];
-export const TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h"];
+// Placeholder list only - the real one comes from GET /symbols, which
+// merges every registered source. ES and NQ used to sit here; they are
+// CME futures and no configured source serves them.
+export const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
+
+// must stay in step with candle_agent/intervals.py
+export const TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"];
 
 const TICK = 0.25;
 const BAR_SECONDS = 300; // 5m
@@ -114,7 +119,7 @@ const stage2: Stage2 = {
 };
 
 export const analysis: Analysis = {
-  symbol: "ES",
+  symbol: "BTCUSDT",
   timeframe: "5m",
   ts: Date.now(),
   stage1,

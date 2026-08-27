@@ -1,5 +1,6 @@
 # docker compose up --build
 # -> http://localhost:8000        chart UI (offline demo, mock LLM, no keys)
+# -> http://localhost:8000/symbols  tradable symbols, merged across sources
 # -> http://localhost:8222        NATS monitoring
 # Flip to live market data + a real LLM via .env (see .env.example).
 services:
@@ -18,9 +19,17 @@ services:
     environment:
       NATS_URL: nats://nats:4222            # service discovery by DNS name
       DB_PATH: /data/candle_agent.db
-      SYMBOL: ${SYMBOL:-BTCUSDT}
+      SYMBOL: ${SYMBOL:-AAPL}
+      INTERVAL: ${INTERVAL:-1m}             # 1m | 5m | 15m | 1h | 4h | 1d
       INGEST_MODE: ${INGEST_MODE:-demo}     # demo | live
       DEMO_INTERVAL_S: ${DEMO_INTERVAL_S:-3}
+      DEFAULT_SOURCE: ${DEFAULT_SOURCE:-alpaca}
+      ALPACA_KEY_ID: ${ALPACA_KEY_ID:-}     # unset -> Alpaca simply not registered
+      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY:-}
+      # trading host vs market-data host; neither may end in /v2
+      ALPACA_BASE_URL: ${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
+      ALPACA_DATA_URL: ${ALPACA_DATA_URL:-https://data.alpaca.markets}
+      ALPACA_FEED: ${ALPACA_FEED:-iex}
       METRICS_PORT: "9101"
     volumes: [agent-data:/data]
     depends_on:
@@ -66,6 +75,16 @@ services:
     environment:
       NATS_URL: nats://nats:4222
       DB_PATH: /data/candle_agent.db
+      # the api builds its own source registry to serve GET /symbols and to
+      # validate POST /subscribe, so it needs the same source config as ingest
+      INTERVAL: ${INTERVAL:-1m}
+      DEFAULT_SOURCE: ${DEFAULT_SOURCE:-alpaca}
+      QUOTE_ASSETS: ${QUOTE_ASSETS:-USDT,USDC}
+      ALPACA_KEY_ID: ${ALPACA_KEY_ID:-}
+      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY:-}
+      ALPACA_BASE_URL: ${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
+      ALPACA_DATA_URL: ${ALPACA_DATA_URL:-https://data.alpaca.markets}
+      ALPACA_FEED: ${ALPACA_FEED:-iex}
     volumes: [agent-data:/data]
     depends_on:
       nats: { condition: service_healthy }

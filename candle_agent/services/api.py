@@ -15,8 +15,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from prometheus_client import make_asgi_app
+from pydantic import BaseModel, Field
 
-from .. import bus, config, db
+from .. import bus, config, db, intervals, sources, symbols
 from ..paper import summarize
 from ..metrics import SSE_CLIENTS
 
@@ -37,14 +38,19 @@ async def lifespan(app):
     _state["nc"], _state["js"] = nc, js
     # ephemeral (non-durable) subscriptions: the browser only cares about
     # events that happen while it's watching.
-    sub1 = await nc.subscribe("analysis.completed.>", cb=_fanout)
-    sub2 = await nc.subscribe("bars.closed.>", cb=_fanout)
-    sub3 = await nc.subscribe("paper.update.>", cb=_fanout)
+    subs = [
+        await nc.subscribe("analysis.completed.>", cb=_fanout),
+        await nc.subscribe("bars.closed.>", cb=_fanout),
+        await nc.subscribe("paper.update.>", cb=_fanout),
+        # connection state from ingest: a 451 or a bad symbol has to reach
+        # the browser, not just the ingest log
+        await nc.subscribe("ingest.status.>", cb=_fanout),
+    ]
     print(f"[api] bus connected {config.NATS_URL}")
+    print(f"[api] sources: {', '.join(sources.names())}")
     yield
-    await sub1.unsubscribe()
-    await sub2.unsubscribe()
-    await sub3.unsubscribe()
+    for sub in subs:
+        await sub.unsubscribe()
     await nc.drain()
 
 
@@ -69,6 +75,79 @@ def healthz():
 @app.get("/api/bars/{symbol}")
 def bars(symbol: str, limit: int = 200):
     return db.recent_bars(symbol.upper(), limit=limit)
+
+
+@app.get("/symbols")
+async def list_symbols(source: str | None = None, asset_class: str | None = None):
+    """Every tradable symbol, merged across registered sources.
+
+    Cached for SYMBOLS_TTL_S. `unavailable` names any source that could
+    not be reached, so a partial list is never mistaken for a complete one.
+    """
+    try:
+        catalogue = await symbols.get_symbols()
+    except symbols.SymbolsUnavailable as e:
+        raise HTTPException(503, str(e))
+
+    items = [s for s in catalogue
+             if (source is None or s.source == source)
+             and (asset_class is None or s.asset_class == asset_class)]
+    return {
+        "symbols": [s.as_dict() for s in items],
+        "sources": sources.names(),
+        "intervals": list(intervals.INTERVALS),
+        "unavailable": symbols.last_errors(),
+    }
+
+
+class SubscribeRequest(BaseModel):
+    symbol: str = Field(min_length=1)
+    interval: str = config.INTERVAL
+    source: str | None = None       # inferred from the symbol when omitted
+
+
+@app.post("/subscribe")
+async def subscribe(req: SubscribeRequest):
+    """Point ingest at a feed and hand back enough bars to draw a chart."""
+    symbol = req.symbol.strip().upper()
+    interval = req.interval
+
+    if not intervals.is_valid(interval):
+        raise HTTPException(
+            400, f"unsupported interval {interval!r}; supported: {intervals.SUPPORTED}")
+
+    try:
+        entry = await symbols.lookup(symbol)
+    except symbols.SymbolsUnavailable as e:
+        # cannot prove the symbol is bad when the catalogue is unreachable
+        raise HTTPException(503, f"symbol list unavailable, cannot validate: {e}")
+
+    if entry is None:
+        raise HTTPException(400, f"unknown symbol {symbol!r}")
+
+    source = req.source or entry.source
+    if source not in sources.names():
+        raise HTTPException(
+            400, f"unknown source {source!r}; registered: {', '.join(sources.names())}")
+
+    try:
+        reply = await _state["nc"].request(
+            bus.INGEST_CONTROL,
+            json.dumps({"symbol": symbol, "interval": interval, "source": source}).encode(),
+            timeout=10,
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        raise HTTPException(503, "ingest service did not respond")
+
+    result = json.loads(reply.data)
+    if result.get("status") != "ok":
+        raise HTTPException(400, result.get("message", "ingest rejected the request"))
+
+    return {
+        **result,
+        "asset_class": entry.asset_class,
+        "bars": db.recent_bars(symbol, limit=200, interval=interval),
+    }
 
 
 @app.get("/api/analysis/{symbol}")

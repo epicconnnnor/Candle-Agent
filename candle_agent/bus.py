@@ -5,6 +5,14 @@ Subjects:
     analysis.request.<SYMBOL>   api    -> analyzer      manual trigger
     analysis.completed.<SYMBOL> analyzer -> api (SSE)   result ready
 
+    ingest.control.subscribe    api    -> ingest        switch feed (request/reply)
+    ingest.status.<SYMBOL>      ingest -> api (SSE)     connection state
+
+The ingest.* subjects are core NATS, deliberately outside the JetStream
+stream: a control request is only meaningful to a live ingest process,
+and a status event is only meaningful to a browser currently watching.
+Persisting either would just replay stale state after a restart.
+
 JetStream gives us at-least-once delivery: the analyzer explicitly ACKs
 each bar after processing it. If an analyzer pod dies mid-analysis, the
 un-ACKed message is redelivered to another consumer in the queue group.
@@ -20,6 +28,8 @@ STREAM = "MARKET"
 SUBJECTS = ["bars.>", "analysis.>", "paper.>"]
 
 BARS_CLOSED = "bars.closed.{symbol}"
+INGEST_CONTROL = "ingest.control.subscribe"
+INGEST_STATUS = "ingest.status.{symbol}"
 ANALYSIS_REQUEST = "analysis.request.{symbol}"
 ANALYSIS_COMPLETED = "analysis.completed.{symbol}"
 PAPER_UPDATE = "paper.update.{symbol}"
@@ -64,6 +74,11 @@ async def connect(startup_retries: int = 30, retry_delay_s: float = 2.0):
 
 async def publish(js, subject: str, payload: dict):
     await js.publish(subject, json.dumps(payload).encode())
+
+
+async def publish_core(nc, subject: str, payload: dict):
+    """Fire-and-forget publish outside JetStream (status, control)."""
+    await nc.publish(subject, json.dumps(payload).encode())
 
 
 def decode(msg) -> dict:

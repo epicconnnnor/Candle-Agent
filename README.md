@@ -14,7 +14,9 @@ It does **not** connect to a broker and it does **not** place orders. It tells y
 
 ## Features
 
-- 📈 **Live candle ingest** — streams OHLCV from market data sources into a message bus
+- 📈 **Live candle ingest** — streams OHLCV from Alpaca (stocks + crypto) or Binance
+- 🌐 **Pluggable sources** — crypto and US equities behind one `DataSource` interface
+- ⏱️ **Selectable timeframe** — 1m, 5m, 15m, 1h, 4h, 1d
 - 🧠 **Two-stage AI analysis** — market diagnosis, then trade decision (limit / breakout / market / no-trade)
 - 🛡️ **Validation layer** — JSON schema checks, semantic consistency, truncation repair, auto-retry
 - 📡 **Real-time push** — Server-Sent Events, no polling
@@ -54,6 +56,98 @@ Full design notes: [`docs/architecture.md`](docs/architecture.md)
 
 ---
 
+## Data sources
+
+Every venue sits behind `DataSource` (`candle_agent/sources/base.py`), so
+ingest only ever sees a `SymbolInfo` and a stream of `Bar` dicts.
+
+| Source | Assets | Credentials | Stream intervals | History |
+|---|---|---|---|---|
+| `alpaca` **(default)** | US equities + crypto | `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` | 1m native, longer rolled up locally | native, all six |
+| `binance` | crypto (USDT/USDC pairs) | none | all six, native | native, all six |
+| `demo` | synthetic | none | all six (`INGEST_MODE=demo`) | synthetic |
+
+**Alpaca is the default** (`DEFAULT_SOURCE=alpaca`, default symbol `AAPL`).
+Binance stays registered and `BTCUSDT` still works through it — but it
+answers **HTTP 451** from US IPs, AWS included, so it cannot be the
+default path. That 451 surfaces as a `region_blocked` status event rather
+than a silent reconnect loop.
+
+The registry is built from whichever credentials are present. With no
+Alpaca keys it registers Binance alone and says so at startup — not a
+crash.
+
+### Alpaca hosts
+
+Two different hosts, and mixing them up costs an afternoon:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `ALPACA_BASE_URL` | trading — assets, clock | `https://paper-api.alpaca.markets` |
+| `ALPACA_DATA_URL` | market data — bars | `https://data.alpaca.markets` |
+
+Neither may end in a version path. The code appends `/v2` (or
+`/v1beta3`) itself, so a URL ending in `/v2` becomes `/v2/v2/assets` and
+returns 404 — which reads as "endpoint gone" rather than "config wrong".
+**Startup refuses such a URL with an explicit error.** Note also that
+paper keys are rejected by the live trading host: paper keys go with
+`paper-api.alpaca.markets`.
+
+### History limits on the free plan
+
+`/subscribe` asks for 200 bars at the requested interval. Alpaca's free
+IEX plan caps how far intraday history goes back — measured, not guessed:
+
+| Interval | AAPL bars returned |
+|---|---|
+| 1m, 5m, 15m, 1h | 200 (full) |
+| 4h | ~60 — equity intraday history stops around 35 days back |
+| 1d | 200 (full) |
+
+Crypto intraday is capped tighter, around 7 days (`BTC/USD` 1h returns
+~168). Widening the request window does not help; it is a plan limit. A
+short backfill is reported as a `backfilled` status event with
+`partial: true`, so a stubby chart explains itself.
+
+Adding a venue means one file implementing four methods, plus a line in
+`sources/__init__.py`.
+
+### Connection status
+
+Ingest publishes what the feed is doing on `ingest.status.<SYMBOL>`,
+forwarded to the browser over SSE. Silence is never left unexplained:
+
+| State | Meaning |
+|---|---|
+| `connected` / `streaming` | socket open; bars flowing |
+| `market_closed` | equity outside market hours, with `next_open` — history is still returned |
+| `stalled` | no bar for 2× the interval **while the clock says the market is open** |
+| `unhealthy` | N consecutive failed reconnects, with the attempt count |
+| `region_blocked` | Binance 451 |
+| `backfill_failed` | history fetch failed; the live stream continues |
+
+`market_closed` and `stalled` are distinguished by Alpaca's clock
+endpoint, not guessed from the absence of data.
+
+---
+
+## API
+
+| Route | What it does |
+|---|---|
+| `GET /symbols` | Tradable symbols merged across sources, cached 24h. Filter with `?source=` / `?asset_class=`. `unavailable` names any source that failed. |
+| `POST /subscribe` | `{symbol, interval, source?}` — repoints ingest, backfills 200 real historical bars at the requested interval, and returns them so the chart renders immediately. Idempotent: the same arguments twice is a no-op, not a second socket. Unknown symbol → 400. |
+| `GET /api/bars/{symbol}` | Stored bars. |
+| `GET /api/analysis/{symbol}` | Latest two-stage analysis. |
+| `POST /api/analyze/{symbol}` | Queue an analysis (202; result arrives over SSE). |
+| `GET /api/paper/{symbol}` | Paper position, history, stats. |
+| `GET /api/events` | SSE: bars, analyses, paper updates, and ingest connection status. |
+
+`source` is optional on `/subscribe` — it is inferred from the symbol's
+entry in the cached catalogue.
+
+---
+
 ## Requirements
 
 | Item | Requirement |
@@ -61,7 +155,7 @@ Full design notes: [`docs/architecture.md`](docs/architecture.md)
 | OS | Linux, macOS, Windows (Docker) |
 | Docker | Compose v2 |
 | Python | 3.11+ (local dev only) |
-| Node | 20+ (frontend only) |
+| Node | 20+ (trading terminal only) |
 | Network | Access to your configured LLM API |
 
 ---
@@ -75,15 +169,15 @@ cp .env.example .env     # add your API key
 docker compose up
 ```
 
-Frontend:
+Trading terminal:
 
 ```bash
-cd frontend
+cd terminal
 npm install
 npm run dev
 ```
 
-Open http://localhost:5173
+Open http://localhost:5174
 
 ---
 
@@ -97,7 +191,7 @@ terraform init
 terraform apply
 ```
 
-The frontend deploys to Cloudflare Pages on every push to `main`.
+The trading terminal (`terminal/`) deploys to Cloudflare Pages on every push to `main`.
 
 ---
 

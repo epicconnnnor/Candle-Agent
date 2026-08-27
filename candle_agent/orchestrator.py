@@ -55,9 +55,12 @@ def _call_validated(llm, system, user, schema, extra_check=None):
 
 
 def analyze(symbol: str, min_bars: int = 30):
+    # recent_bars resolves to the symbol's most recently ingested interval,
+    # so the analyzer never has to know which one is live
     bars = db.recent_bars(symbol, limit=100)
     if len(bars) < min_bars:
         raise RuntimeError(f"need at least {min_bars} bars, have {len(bars)}")
+    interval = bars[-1].get("interval", "1m")
 
     packet = build_feature_packet(bars)
     user_ctx = (
@@ -80,5 +83,6 @@ def analyze(symbol: str, min_bars: int = 30):
     )
 
     latency_ms = int((time.time() - t0) * 1000)
-    db.insert_analysis(symbol, bars[-1]["ts"], stage1, stage2, llm.model, latency_ms)
+    db.insert_analysis(symbol, bars[-1]["ts"], stage1, stage2, llm.model,
+                       latency_ms, interval=interval)
     return {"stage1": stage1, "stage2": stage2, "model": llm.model, "latency_ms": latency_ms}

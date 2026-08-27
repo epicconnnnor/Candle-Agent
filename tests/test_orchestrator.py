@@ -1,9 +1,10 @@
 import os
+import tempfile
 
 import pytest
 
 os.environ["LLM_PROVIDER"] = "mock"
-os.environ["DB_PATH"] = "/tmp/test_candle_agent.db"
+os.environ["DB_PATH"] = os.path.join(tempfile.gettempdir(), "test_candle_agent.db")
 
 from candle_agent import db
 from candle_agent.demo import synthetic_bars
@@ -11,15 +12,18 @@ from candle_agent.orchestrator import analyze
 from candle_agent.schemas import consistency_errors
 
 
-def seed(symbol, n_bars):
+def seed(symbol, n_bars, interval="1m"):
     for b in synthetic_bars(n_bars):
-        db.insert_bar(symbol, b["ts"], b["open"], b["high"], b["low"], b["close"], b["volume"])
+        db.insert_bar(symbol, interval, b["ts"], b["open"], b["high"],
+                      b["low"], b["close"], b["volume"])
 
 
 @pytest.fixture(autouse=True)
 def clean_db():
-    if os.path.exists(os.environ["DB_PATH"]):
-        os.remove(os.environ["DB_PATH"])
+    for suffix in ("", "-wal", "-shm"):     # WAL sidecars hold committed rows
+        path = os.environ["DB_PATH"] + suffix
+        if os.path.exists(path):
+            os.remove(path)
     yield
 
 

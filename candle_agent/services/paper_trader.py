@@ -21,7 +21,20 @@ from ..paper import on_bar, summarize, trade_from_decision
 _active: dict[str, dict] = {}   # symbol -> pending/open trade
 
 
-def _load_state(symbol: str):
+def _load_state():
+    """Reload every pending/open trade.
+
+    The paper service is not configured with a symbol - it follows
+    whatever the bus carries - so recovery cannot look up just one. It
+    used to ask for config.SYMBOL, which no compose service sets, and so
+    always recovered BTCUSDT regardless of what was actually being traded.
+    """
+    for t in db.active_trades():
+        _active[t["symbol"]] = t
+        print(f"[paper] recovered {t['status']} trade #{t['id']} for {t['symbol']}")
+
+
+def _load_symbol(symbol: str):
     t = db.active_trade(symbol)
     if t:
         _active[symbol] = t
@@ -40,8 +53,8 @@ async def _publish_update(js, symbol: str):
 async def _on_signal(js, msg):
     data = bus.decode(msg)
     symbol = data["symbol"]
-    if symbol not in _active and symbol != config.SYMBOL:
-        _load_state(symbol)
+    if symbol not in _active:
+        _load_symbol(symbol)
     cur = _active.get(symbol)
     if cur and cur["status"] == "open":
         await msg.ack()                      # in a position: ignore new signals
@@ -100,7 +113,7 @@ async def _consume(js, subject, durable, handler):
 
 async def main():
     serve_metrics()
-    _load_state(config.SYMBOL)
+    _load_state()
     nc, js = await bus.connect()
     print(f"[paper] bus connected {config.NATS_URL}, risk/trade=${config.RISK_PER_TRADE}")
     await asyncio.gather(
