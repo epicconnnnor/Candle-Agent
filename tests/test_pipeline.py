@@ -307,3 +307,111 @@ def test_crash_recovery_reloads_every_open_symbol():
     paper_trader._load_state()
 
     assert set(paper_trader._active) == {"ETHUSDT", "SOLUSDT"}
+
+
+# --- progress events -----------------------------------------------------
+
+def _nats_matches(subject: str, pattern: str) -> bool:
+    """Minimal NATS subject matcher: '*' is one token, '>' is the rest."""
+    s, p = subject.split("."), pattern.split(".")
+    for i, tok in enumerate(p):
+        if tok == ">":
+            return len(s) > i
+        if i >= len(s) or (tok != "*" and tok != s[i]):
+            return False
+    return len(s) == len(p)
+
+
+def test_stage1_subject_does_not_collide_with_the_completed_wildcard():
+    """Existing consumers bind to analysis.completed.> - the progress
+    subject must not be swept up by it."""
+    from candle_agent import bus
+    stage1 = bus.STAGE1_COMPLETED.format(symbol="AAPL")
+    assert not _nats_matches(stage1, "analysis.completed.>")
+    assert _nats_matches(bus.ANALYSIS_COMPLETED.format(symbol="AAPL"), "analysis.completed.>")
+    assert _nats_matches(stage1, "analysis.stage1.completed.>")
+
+
+def test_progress_events_fire_in_order_and_before_stage_2(monkeypatch):
+    """The whole point is timing: snapshot before stage 1, stage 1 before
+    stage 2 is even asked for."""
+    import json as _json
+    from candle_agent.orchestrator import analyze
+
+    db.insert_bars("PROGRESS", "1m", ramp(60))
+
+    timeline: list[str] = []
+
+    class ScriptedLLM:
+        model = "scripted"
+        usage: list[dict] = []
+
+        def complete(self, system, user):
+            stage = 1 if "STAGE-1" in system else 2
+            timeline.append(f"llm:stage{stage}")
+            if stage == 1:
+                return _json.dumps({"regime": "range", "strength": "weak",
+                                    "key_levels": [1.0], "summary": "flat"})
+            return _json.dumps({"decision": "no_trade", "entry": None, "stop": None,
+                                "target": None, "risk_reward": None,
+                                "confidence": "low", "reasoning_chain": ["none"]})
+
+    events: list[tuple[str, dict]] = []
+
+    def on_event(name, payload):
+        timeline.append(f"event:{name}")
+        events.append((name, payload))
+
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+    analyze("PROGRESS", min_bars=30, llm=ScriptedLLM(), on_event=on_event)
+
+    assert timeline == [
+        "event:snapshot.built",
+        "llm:stage1",
+        "event:analysis.stage1.completed",
+        "llm:stage2",
+    ], timeline
+
+    names = [n for n, _ in events]
+    assert names == ["snapshot.built", "analysis.stage1.completed"]
+
+
+def test_snapshot_payload_is_small_and_describes_the_window():
+    from candle_agent.orchestrator import analyze
+    from candle_agent.llm import MockLLM
+
+    bars = ramp(60)
+    db.insert_bars("SNAP", "1m", bars)
+    events: list[tuple[str, dict]] = []
+    analyze("SNAP", min_bars=30, llm=MockLLM(), on_event=lambda n, p: events.append((n, p)))
+
+    payload = dict(events)["snapshot.built"]
+    assert set(payload) == {"symbol", "interval", "bars", "first_ts", "last_ts"}
+    assert payload["bars"] == 60
+    assert payload["first_ts"] < payload["last_ts"]
+    # nothing heavy: no bar table, no packet
+    assert len(str(payload)) < 200
+
+
+def test_stage1_event_carries_the_diagnosis():
+    from candle_agent.orchestrator import analyze
+    from candle_agent.llm import MockLLM
+
+    db.insert_bars("DIAG", "1m", ramp(60))
+    events: list[tuple[str, dict]] = []
+    analyze("DIAG", min_bars=30, llm=MockLLM(), on_event=lambda n, p: events.append((n, p)))
+
+    payload = dict(events)["analysis.stage1.completed"]
+    assert payload["symbol"] == "DIAG"
+    assert payload["stage1"]["regime"]
+    assert "stage2" not in payload          # stage 2 has not happened yet
+
+
+def test_analyze_still_works_without_an_event_callback():
+    """on_event is optional; nothing may depend on a caller supplying it."""
+    from candle_agent.orchestrator import analyze
+    from candle_agent.llm import MockLLM
+
+    db.insert_bars("NOCB", "1m", ramp(60))
+    result = analyze("NOCB", min_bars=30, llm=MockLLM())
+    assert result["stage1"]["regime"]

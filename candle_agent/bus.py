@@ -5,6 +5,14 @@ Subjects:
     analysis.request.<SYMBOL>   api    -> analyzer      manual trigger
     analysis.completed.<SYMBOL> analyzer -> api (SSE)   result ready
 
+    snapshot.built.<SYMBOL>            -> api (SSE)   feature packet ready
+    analysis.stage1.completed.<SYMBOL> -> api (SSE)   diagnosis validated
+
+The two progress subjects exist so the UI can show stage 1 and stage 2
+moving independently. `analysis.stage1.completed.<SYMBOL>` does NOT match
+the `analysis.completed.>` wildcard - the second token differs - so no
+existing consumer sees it by accident.
+
     ingest.control.subscribe    api    -> ingest        switch feed (request/reply)
     ingest.status.<SYMBOL>      ingest -> api (SSE)     connection state
 
@@ -32,6 +40,14 @@ INGEST_CONTROL = "ingest.control.subscribe"
 INGEST_STATUS = "ingest.status.{symbol}"
 ANALYSIS_REQUEST = "analysis.request.{symbol}"
 ANALYSIS_COMPLETED = "analysis.completed.{symbol}"
+SNAPSHOT_BUILT = "snapshot.built.{symbol}"
+STAGE1_COMPLETED = "analysis.stage1.completed.{symbol}"
+
+# progress events, keyed by the name the orchestrator emits
+PROGRESS_SUBJECTS = {
+    "snapshot.built": SNAPSHOT_BUILT,
+    "analysis.stage1.completed": STAGE1_COMPLETED,
+}
 PAPER_UPDATE = "paper.update.{symbol}"
 
 

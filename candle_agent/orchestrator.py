@@ -54,9 +54,18 @@ def _call_validated(llm, system, user, schema, extra_check=None):
     raise RuntimeError(f"LLM output failed validation after retries: {last_err}")
 
 
-def analyze(symbol: str, min_bars: int = 30, llm=None):
-    """`llm` defaults to the configured client; pass one to instrument the
-    call (token accounting) or to script a response in a test."""
+def analyze(symbol: str, min_bars: int = 30, llm=None, on_event=None):
+    """Run the two-stage pipeline.
+
+    `llm` defaults to the configured client; pass one to instrument the
+    call (token accounting) or to script a response in a test.
+
+    `on_event(name, payload)` is called as each stage lands, so a caller
+    can publish progress at the moment it happens. It is synchronous and
+    must not block - services bridge it back to the event loop. Emitting
+    from here rather than from build_feature_packet keeps features.py a
+    pure function with no I/O; it is the same instant either way.
+    """
     # recent_bars resolves to the symbol's most recently ingested interval,
     # so the analyzer never has to know which one is live
     bars = db.recent_bars(symbol, limit=100)
@@ -64,7 +73,16 @@ def analyze(symbol: str, min_bars: int = 30, llm=None):
         raise RuntimeError(f"need at least {min_bars} bars, have {len(bars)}")
     interval = bars[-1].get("interval", "1m")
 
+    emit = on_event or (lambda name, payload: None)
+
     packet = build_feature_packet(bars)
+    emit("snapshot.built", {
+        "symbol": symbol,
+        "interval": interval,
+        "bars": len(bars),
+        "first_ts": bars[0]["ts"],
+        "last_ts": bars[-1]["ts"],
+    })
     user_ctx = (
         f"symbol: {symbol}\n"
         f"EMA20: {packet['ema20']} (price {packet['price_vs_ema']})\n"
@@ -77,6 +95,13 @@ def analyze(symbol: str, min_bars: int = 30, llm=None):
     t0 = time.time()
 
     stage1 = _call_validated(llm, _prompt("stage1_diagnose.txt"), user_ctx, STAGE1_SCHEMA)
+    # validated, and before stage 2 has started
+    emit("analysis.stage1.completed", {
+        "symbol": symbol,
+        "interval": interval,
+        "bar_ts": bars[-1]["ts"],
+        "stage1": stage1,
+    })
 
     route = ROUTES[stage1["regime"]]
     stage2_user = f"Stage-1 diagnosis:\n{json.dumps(stage1)}\n\n{user_ctx}"

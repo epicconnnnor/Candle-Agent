@@ -10,6 +10,18 @@ import type {
 
 /** Status slots, kept apart so a market-closed note and a partial backfill
  *  can both be on screen without one overwriting the other. */
+/** Where the current analysis run has got to, from real events only. */
+export interface Progress {
+  snapshotAt: number | null;
+  stage1At: number | null;
+  completedAt: number | null;
+  bars: number | null;
+}
+
+const NO_PROGRESS: Progress = {
+  snapshotAt: null, stage1At: null, completedAt: null, bars: null,
+};
+
 export interface Notices {
   problem: IngestStatus | null;
   market: IngestStatus | null;
@@ -31,6 +43,11 @@ interface Feed {
   analysisAtr: number | null;
   connection: ConnectionState;
   notices: Notices;
+  /** Wall clock of the most recent SSE event, for "last refresh". */
+  lastEventAt: number | null;
+  /** Bar events received this session. 0 means nothing has streamed yet. */
+  barEvents: number;
+  progress: Progress;
   /** Replace the series wholesale - used by a subscribe. */
   reset: (
     rows: BarRow[],
@@ -55,6 +72,9 @@ export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
   const [analysisAtr, setAnalysisAtr] = useState<number | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [notices, setNotices] = useState<Notices>(EMPTY);
+  const [lastEventAt, setLastEventAt] = useState<number | null>(null);
+  const [barEvents, setBarEvents] = useState(0);
+  const [progress, setProgress] = useState<Progress>(NO_PROGRESS);
 
   // read inside the SSE callbacks without re-opening the stream on change
   const symbolRef = useRef(symbol);
@@ -81,6 +101,8 @@ export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
     });
   }, []);
 
+  const resetCounters = () => setBarEvents(0);
+
   const reset = useCallback((
     rows: BarRow[],
     next?: AnalysisCompleted | null,
@@ -96,14 +118,34 @@ export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
     setAnalysisPrice(next ? (priceAt ?? null) : null);
     setAnalysisAtr(next ? (atrAt ?? null) : null);
     setNotices(EMPTY);
+    resetCounters();          // a new series has streamed nothing yet
+    setProgress(NO_PROGRESS); // and no run has started against it
   }, []);
 
   useEffect(() => {
     const dispose = openFeed({
       onConnection: setConnection,
-      onStatus: applyStatus,
+      onStatus: (s) => {
+        setLastEventAt(Date.now());
+        applyStatus(s);
+      },
+      onSnapshot: (s) => {
+        setLastEventAt(Date.now());
+        if (s.symbol !== symbolRef.current) return;
+        // a snapshot starts a run: clear the later marks
+        setProgress({
+          snapshotAt: Date.now(), stage1At: null, completedAt: null, bars: s.bars,
+        });
+      },
+      onStage1: (s) => {
+        setLastEventAt(Date.now());
+        if (s.symbol !== symbolRef.current) return;
+        setProgress((prev) => ({ ...prev, stage1At: Date.now() }));
+      },
       onAnalysis: (a) => {
+        setLastEventAt(Date.now());
         if (a.symbol !== symbolRef.current) return;
+        setProgress((prev) => ({ ...prev, completedAt: Date.now() }));
         setAnalysis(a);
         // a live analysis is formed against the price we have right now;
         // the ATR is recomputed by the caller from the same bars
@@ -111,7 +153,9 @@ export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
         setAnalysisAtr(null);
       },
       onBar: (raw) => {
+        setLastEventAt(Date.now());
         if (raw.symbol !== symbolRef.current) return;
+        setBarEvents((n) => n + 1);
         const bar = toBar(raw);
         lastCloseRef.current = bar.close;
         barCb.current?.(bar);           // incremental series.update()
@@ -135,6 +179,7 @@ export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
   }, [applyStatus]);
 
   return {
-    bars, analysis, analysisPrice, analysisAtr, connection, notices, reset, applyStatus,
+    bars, analysis, analysisPrice, analysisAtr, connection, notices,
+    lastEventAt, barEvents, progress, reset, applyStatus,
   };
 }

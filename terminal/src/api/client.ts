@@ -15,7 +15,9 @@ import type {
   InlineAnalysis,
   KeyTestResult,
   PaperUpdate,
+  SnapshotBuilt,
   SseEnvelope,
+  Stage1Completed,
   StoredAnalysis,
   SubscribeRequest,
   SubscribeResponse,
@@ -152,6 +154,8 @@ export interface FeedHandlers {
   onBar?: (bar: BarClosed) => void;
   onAnalysis?: (a: AnalysisCompleted) => void;
   onStatus?: (s: IngestStatus) => void;
+  onSnapshot?: (s: SnapshotBuilt) => void;
+  onStage1?: (s: Stage1Completed) => void;
   onPaper?: (p: PaperUpdate) => void;
   onConnection?: (state: ConnectionState) => void;
 }
@@ -197,8 +201,14 @@ export function openFeed(handlers: FeedHandlers): () => void {
       const { subject, data } = envelope;
       if (subject.startsWith("bars.closed.")) {
         handlers.onBar?.(data as BarClosed);
+      } else if (subject.startsWith("analysis.stage1.completed.")) {
+        // checked before analysis.completed: distinct subjects, and this
+        // one is the earlier signal
+        handlers.onStage1?.(data as Stage1Completed);
       } else if (subject.startsWith("analysis.completed.")) {
         handlers.onAnalysis?.(data as AnalysisCompleted);
+      } else if (subject.startsWith("snapshot.built.")) {
+        handlers.onSnapshot?.(data as SnapshotBuilt);
       } else if (subject.startsWith("ingest.status.")) {
         handlers.onStatus?.(data as IngestStatus);
       } else if (subject.startsWith("paper.update.")) {
