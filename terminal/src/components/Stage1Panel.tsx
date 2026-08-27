@@ -1,32 +1,52 @@
-import { AlertTriangle, FileJson } from "lucide-react";
+import { AlertTriangle, FileJson, HelpCircle } from "lucide-react";
 import Card, { CardRow, CardRows } from "./ui/Card";
 import Button from "./ui/Button";
 import type { AnalysisCompleted } from "../api/types";
+import type { Freshness } from "../lib/freshness";
 
 interface Props {
   analysis: AnalysisCompleted | null;
   symbol: string;
   interval: string;
-  /** Price has drifted more than 2x ATR since this analysis was made. */
-  stale: boolean;
-  driftAtr: number;
+  /** Whether price has drifted away from the market this analysis read. */
+  freshness: Freshness;
 }
 
-/** Shown when price has walked away from the market this analysis read. */
-export function StaleMark({ driftAtr }: { driftAtr: number }) {
+/**
+ * Nothing is shown while an analysis still describes the market.
+ *
+ * "Age unknown" is its own state, not a synonym for fresh: rows stored
+ * before price_at existed carry no price to compare against, and claiming
+ * they are current would be a claim we cannot support.
+ */
+export function FreshnessMark({ freshness }: { freshness: Freshness }) {
+  if (freshness.state === "fresh") return null;
+
+  if (freshness.state === "unknown") {
+    return (
+      <span
+        title="This analysis predates price tracking, so its age cannot be judged."
+        className="flex items-center gap-1.5 font-sans text-[13px] text-muted"
+      >
+        <HelpCircle size={13} />
+        Age unknown
+      </span>
+    );
+  }
+
   return (
     <span
-      title={`Price has moved ${driftAtr.toFixed(1)}x ATR since this analysis was made.`}
+      title={`Price has moved ${freshness.driftAtr.toFixed(1)}x ATR since this analysis was made.`}
       className="flex items-center gap-1.5 font-sans text-[13px] text-bear"
     >
       <AlertTriangle size={13} />
-      Stale · {driftAtr.toFixed(1)}x ATR
+      Stale · {freshness.driftAtr.toFixed(1)}x ATR
     </span>
   );
 }
 
 export default function Stage1Panel({
-  analysis, symbol, interval, stale, driftAtr,
+  analysis, symbol, interval, freshness,
 }: Props) {
   if (!analysis) {
     return (
@@ -58,7 +78,7 @@ export default function Stage1Panel({
       title="Stage 1 diagnosis"
       action={
         <span className="flex items-center gap-3">
-          {stale && <StaleMark driftAtr={driftAtr} />}
+          <FreshnessMark freshness={freshness} />
           <Button onClick={exportJson}>
             <FileJson size={16} />
             Export JSON

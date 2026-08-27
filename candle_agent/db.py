@@ -39,7 +39,11 @@ CREATE TABLE IF NOT EXISTS analyses (
     stage2 TEXT NOT NULL,
     model TEXT,
     latency_ms INTEGER,
-    interval TEXT NOT NULL DEFAULT '1m'
+    interval TEXT NOT NULL DEFAULT '1m',
+    -- the market this verdict was formed against; nullable because rows
+    -- written before these existed genuinely do not know
+    price_at REAL,
+    atr_at REAL
 );
 CREATE TABLE IF NOT EXISTS paper_trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,6 +88,12 @@ def _migrate(c):
     if analysis_cols and "interval" not in analysis_cols:
         c.execute("ALTER TABLE analyses ADD COLUMN interval TEXT NOT NULL DEFAULT '1m'")
         print("[db] migrated analyses: added interval")
+    # No DEFAULT: a pre-existing row must read NULL, not a fabricated price.
+    # The UI shows those as "age unknown" rather than claiming freshness.
+    for column in ("price_at", "atr_at"):
+        if analysis_cols and column not in analysis_cols:
+            c.execute(f"ALTER TABLE analyses ADD COLUMN {column} REAL")
+            print(f"[db] migrated analyses: added {column}")
 
 
 @contextmanager
@@ -153,12 +163,16 @@ def recent_bars(symbol, limit=100, interval=None):
     return [dict(r) for r in reversed(rows)]
 
 
-def insert_analysis(symbol, ts, stage1, stage2, model, latency_ms, interval="1m"):
+def insert_analysis(symbol, ts, stage1, stage2, model, latency_ms, interval="1m",
+                    price_at=None, atr_at=None):
+    """`price_at` / `atr_at` capture the market at the moment of analysis, so
+    staleness can be judged later without guessing."""
     with conn() as c:
         c.execute(
-            "INSERT INTO analyses (symbol, ts, stage1, stage2, model, latency_ms, interval) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (symbol, ts, json.dumps(stage1), json.dumps(stage2), model, latency_ms, interval),
+            "INSERT INTO analyses (symbol, ts, stage1, stage2, model, latency_ms, "
+            "interval, price_at, atr_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (symbol, ts, json.dumps(stage1), json.dumps(stage2), model, latency_ms,
+             interval, price_at, atr_at),
         )
 
 

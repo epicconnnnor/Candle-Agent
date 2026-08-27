@@ -32,10 +32,19 @@ interface Props {
    *  new interval, fresh backfill). Live ticks go through update()
    *  instead, so a bar arriving never re-sets the whole series. */
   revision: number;
+  /**
+   * Whether the decision levels may widen the price scale.
+   *
+   * Only for an analysis that still describes this market. A stale or
+   * unknown-age one keeps its lines - they are what it said - but must not
+   * drag the axis out to reach them, which squashes the candles into a
+   * band and is the distortion this guards against.
+   */
+  scaleToLevels?: boolean;
 }
 
 const Chart = forwardRef<ChartHandle, Props>(function Chart(
-  { bars, stage1, stage2, revision },
+  { bars, stage1, stage2, revision, scaleToLevels = true },
   ref
 ) {
   const host = useRef<HTMLDivElement>(null);
@@ -161,13 +170,16 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
     );
 
     lines.current = [...drawn, ...structure];
-    levels.current = [
-      ...decision.map((d) => d[0]).filter((v): v is number => typeof v === "number"),
-      ...(stage1?.key_levels ?? []),
-    ];
+    // lines are always drawn; only a current analysis gets to widen the scale
+    levels.current = scaleToLevels
+      ? [
+          ...decision.map((d) => d[0]).filter((v): v is number => typeof v === "number"),
+          ...(stage1?.key_levels ?? []),
+        ]
+      : [];
     // price lines don't invalidate the price scale on their own
     chart.current?.priceScale("right").applyOptions({ autoScale: true });
-  }, [stage1, stage2]);
+  }, [stage1, stage2, scaleToLevels]);
 
   useImperativeHandle(ref, () => ({
     update: (bar) => {

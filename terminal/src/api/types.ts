@@ -124,6 +124,10 @@ export interface StoredAnalysis {
   stage2: Stage2;
   model: string;
   latency_ms: number;
+  /** Last close when the analysis was produced. Null on pre-migration rows. */
+  price_at: number | null;
+  /** ATR14 at that moment. Null on pre-migration rows. */
+  atr_at: number | null;
 }
 
 /** POST /api/analyze/{symbol} - 202, the result arrives over SSE. */
