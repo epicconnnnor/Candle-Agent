@@ -26,12 +26,18 @@ const FAULTS = new Set(["failed", "error", "unhealthy", "stalled", "backfill_fai
 interface Feed {
   bars: Bar[];
   analysis: AnalysisCompleted | null;
-  /** Last close at the moment the analysis arrived, for staleness. */
+  /** Market at the moment the analysis was produced, for staleness. */
   analysisPrice: number | null;
+  analysisAtr: number | null;
   connection: ConnectionState;
   notices: Notices;
   /** Replace the series wholesale - used by a subscribe. */
-  reset: (rows: BarRow[], analysis?: AnalysisCompleted | null) => void;
+  reset: (
+    rows: BarRow[],
+    analysis?: AnalysisCompleted | null,
+    priceAt?: number | null,
+    atrAt?: number | null,
+  ) => void;
   /** Seed the notice slots from a subscribe reply's `state`. */
   applyStatus: (s: IngestStatus) => void;
 }
@@ -46,6 +52,7 @@ export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
   const [bars, setBars] = useState<Bar[]>([]);
   const [analysis, setAnalysis] = useState<AnalysisCompleted | null>(null);
   const [analysisPrice, setAnalysisPrice] = useState<number | null>(null);
+  const [analysisAtr, setAnalysisAtr] = useState<number | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [notices, setNotices] = useState<Notices>(EMPTY);
 
@@ -74,14 +81,20 @@ export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
     });
   }, []);
 
-  const reset = useCallback((rows: BarRow[], next?: AnalysisCompleted | null) => {
+  const reset = useCallback((
+    rows: BarRow[],
+    next?: AnalysisCompleted | null,
+    priceAt?: number | null,
+    atrAt?: number | null,
+  ) => {
     const mapped = rows.map(toBar);
     setBars(mapped);
     lastCloseRef.current = mapped.length ? mapped[mapped.length - 1].close : null;
-    // A new series means any previous analysis describes a different market.
-    // Clearing it here is what pulls the old price lines off the chart.
+    // A restored analysis brings the market it was formed against with it.
+    // Passing null clears - which is what pulls old price lines off the chart.
     setAnalysis(next ?? null);
-    setAnalysisPrice(next ? lastCloseRef.current : null);
+    setAnalysisPrice(next ? (priceAt ?? null) : null);
+    setAnalysisAtr(next ? (atrAt ?? null) : null);
     setNotices(EMPTY);
   }, []);
 
@@ -92,8 +105,10 @@ export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
       onAnalysis: (a) => {
         if (a.symbol !== symbolRef.current) return;
         setAnalysis(a);
-        // the market price this verdict was formed against
+        // a live analysis is formed against the price we have right now;
+        // the ATR is recomputed by the caller from the same bars
         setAnalysisPrice(lastCloseRef.current);
+        setAnalysisAtr(null);
       },
       onBar: (raw) => {
         if (raw.symbol !== symbolRef.current) return;
@@ -119,5 +134,7 @@ export function useFeed(symbol: string, onBar?: (bar: Bar) => void): Feed {
     return dispose;
   }, [applyStatus]);
 
-  return { bars, analysis, analysisPrice, connection, notices, reset, applyStatus };
+  return {
+    bars, analysis, analysisPrice, analysisAtr, connection, notices, reset, applyStatus,
+  };
 }

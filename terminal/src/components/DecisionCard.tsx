@@ -1,5 +1,6 @@
 import Card from "./ui/Card";
 import type { Stage2 } from "../api/types";
+import type { Freshness } from "../lib/freshness";
 
 const DECISION_LABEL: Record<string, string> = {
   buy_limit: "Buy limit",
@@ -19,9 +20,10 @@ const DECISION_LABEL: Record<string, string> = {
  * divided only by whitespace - no nested borders.
  */
 export default function DecisionCard({
-  stage2, stale = false,
-}: { stage2: Stage2 | null; stale?: boolean }) {
+  stage2, freshness,
+}: { stage2: Stage2 | null; freshness: Freshness }) {
   const title = "Decision";
+  const stale = freshness.state === "stale";
 
   if (!stage2) {
     return (
@@ -68,6 +70,9 @@ export default function DecisionCard({
             </span>
           )}
           {stale && <span className="font-sans text-[13px] text-bear">Stale</span>}
+          {freshness.state === "unknown" && (
+            <span className="font-sans text-[13px] text-muted">Age unknown</span>
+          )}
         </span>
       }
     >

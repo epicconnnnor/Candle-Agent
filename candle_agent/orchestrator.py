@@ -86,5 +86,7 @@ def analyze(symbol: str, min_bars: int = 30, llm=None):
 
     latency_ms = int((time.time() - t0) * 1000)
     db.insert_analysis(symbol, bars[-1]["ts"], stage1, stage2, llm.model,
-                       latency_ms, interval=interval)
+                       latency_ms, interval=interval,
+                       # the same numbers the model was shown
+                       price_at=packet["last_close"], atr_at=packet["atr14"])
     return {"stage1": stage1, "stage2": stage2, "model": llm.model, "latency_ms": latency_ms}

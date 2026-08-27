@@ -114,3 +114,58 @@ def test_the_invariant_holds_for_every_request_the_client_makes(sent):
     for body in sent:
         if body.get("response_format", {}).get("type") == "json_object":
             assert "json" in json.dumps(body["messages"]), body["messages"][0]["content"][:80]
+
+
+# --- analysis provenance columns ----------------------------------------
+
+def test_price_at_and_atr_at_round_trip(tmp_path, monkeypatch):
+    """A new analysis records the market it was formed against."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "provenance.db"))
+    from candle_agent import db
+
+    db.insert_analysis("AAPL", 1, {"regime": "range"}, {"decision": "no_trade"},
+                       "deepseek-chat", 900, interval="1m",
+                       price_at=314.54, atr_at=0.62)
+    row = db.latest_analysis("AAPL", "1m")
+    assert row["price_at"] == 314.54
+    assert row["atr_at"] == 0.62
+
+
+def test_pre_migration_rows_read_null_not_a_fabricated_price(tmp_path, monkeypatch):
+    """The UI shows these as 'age unknown'; a DEFAULT would fake freshness."""
+    import sqlite3
+    path = tmp_path / "legacy.db"
+    monkeypatch.setenv("DB_PATH", str(path))
+
+    c = sqlite3.connect(path)
+    c.executescript("""
+        CREATE TABLE analyses (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          symbol TEXT NOT NULL, ts INTEGER NOT NULL, stage1 TEXT NOT NULL,
+          stage2 TEXT NOT NULL, model TEXT, latency_ms INTEGER,
+          interval TEXT NOT NULL DEFAULT '1m');
+    """)
+    c.execute("INSERT INTO analyses (symbol, ts, stage1, stage2, model, latency_ms, interval)"
+              " VALUES (?,?,?,?,?,?,?)",
+              ("AAPL", 1, '{"regime":"range"}', '{"decision":"no_trade"}', "old", 5, "1m"))
+    c.commit()
+    c.close()
+
+    from candle_agent import db
+    row = db.latest_analysis("AAPL")
+    assert row["price_at"] is None
+    assert row["atr_at"] is None
+
+
+def test_latest_analysis_is_scoped_by_interval(tmp_path, monkeypatch):
+    """Restoring across intervals is what put wrong levels on the chart."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "scoped.db"))
+    from candle_agent import db
+
+    db.insert_analysis("AAPL", 1, {"regime": "range"}, {"decision": "no_trade"},
+                       "m", 1, interval="1m", price_at=100.0, atr_at=1.0)
+    db.insert_analysis("AAPL", 2, {"regime": "bull_trend"}, {"decision": "buy_limit"},
+                       "m", 1, interval="5m", price_at=200.0, atr_at=2.0)
+
+    assert db.latest_analysis("AAPL", "1m")["price_at"] == 100.0
+    assert db.latest_analysis("AAPL", "5m")["price_at"] == 200.0
+    assert db.latest_analysis("AAPL", "1h") is None

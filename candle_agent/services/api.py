@@ -203,8 +203,13 @@ async def subscribe(req: SubscribeRequest):
 
 
 @app.get("/api/analysis/{symbol}")
-def latest(symbol: str):
-    a = db.latest_analysis(symbol.upper())
+def latest(symbol: str, interval: str | None = None):
+    """Latest analysis, optionally scoped to one interval.
+
+    The terminal scopes it: an analysis of the 1m series says nothing about
+    the 5m one, so restoring across intervals would show the wrong levels.
+    """
+    a = db.latest_analysis(symbol.upper(), interval)
     if not a:
         raise HTTPException(404, "no analysis yet - POST /api/analyze/{symbol}")
     return a

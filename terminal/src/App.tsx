@@ -17,15 +17,15 @@ import { useAnalyze } from "./hooks/useAnalyze";
 import { useFeed } from "./hooks/useFeed";
 import { atr } from "./lib/indicators";
 import { loadRecent } from "./lib/recent";
-import { getSymbols, hasStatus, subscribe } from "./api/client";
+import { freshnessOf } from "./lib/freshness";
+import { getAnalysis, getSymbols, hasStatus, subscribe } from "./api/client";
 import type { Bar, IngestStatus, Interval, SymbolInfo } from "./api/types";
 
 const FALLBACK_SYMBOL = import.meta.env.VITE_DEFAULT_SYMBOL ?? "AAPL";
 /** Reopen on the last symbol picked, so a reload keeps your place. */
 const INITIAL_SYMBOL = loadRecent()[0] ?? FALLBACK_SYMBOL;
 const FALLBACK_INTERVALS: Interval[] = ["1m", "5m", "15m", "1h", "4h", "1d"];
-/** Price drift, in ATRs, past which an analysis is marked stale. */
-const STALE_ATR_MULTIPLE = 2;
+
 
 export default function App() {
   const [symbol, setSymbol] = useState(INITIAL_SYMBOL);
@@ -69,12 +69,27 @@ export default function App() {
           interval: nextInterval,
           source,
         });
-        // Deliberately NOT restoring the stored analysis. It was formed
-        // against a different symbol, interval or price, and rehydrating it
-        // put stale entry/stop/target lines on the chart - which then
-        // stretched the y-axis to reach them. A fresh one arrives on the
-        // next closed bar, or on demand via Analyze.
-        feed.reset(res.bars, null);
+        // Restore the latest analysis for THIS symbol and interval. Scoping
+        // the lookup is what keeps the old bug fixed: a verdict from another
+        // series can no longer come back and put its levels on this chart.
+        const stored = await getAnalysis(res.symbol, nextInterval);
+        const matches =
+          stored && stored.symbol === res.symbol && stored.interval === nextInterval;
+        feed.reset(
+          res.bars,
+          matches
+            ? {
+                symbol: stored.symbol,
+                bar_ts: stored.ts,
+                stage1: stored.stage1,
+                stage2: stored.stage2,
+                model: stored.model,
+                latency_ms: stored.latency_ms,
+              }
+            : null,
+          matches ? stored.price_at : null,
+          matches ? stored.atr_at : null,
+        );
         setSource(res.source);
         if (hasStatus(res.state)) feed.applyStatus(res.state);
         setRevision((r) => r + 1);          // tells the chart to setData once
@@ -146,13 +161,12 @@ export default function App() {
   const changePct = last && prev && prev.close ? (change / prev.close) * 100 : 0;
   const atr14 = useMemo(() => atr(bars), [bars]);
 
-  // An analysis describes the market at one price. Once price has walked
-  // more than 2x ATR away from that, the levels it named are no longer a
-  // description of what is on screen - say so rather than showing them plain.
-  const drift =
-    last && feed.analysisPrice != null ? Math.abs(last.close - feed.analysisPrice) : 0;
-  const driftAtr = atr14 > 0 ? drift / atr14 : 0;
-  const stale = Boolean(feed.analysis) && driftAtr > STALE_ATR_MULTIPLE;
+  const freshness = freshnessOf({
+    analysisPrice: feed.analysisPrice,
+    analysisAtr: feed.analysisAtr,
+    currentPrice: last?.close ?? null,
+    currentAtr: atr14,
+  });
 
   const problem = fault ?? feed.notices.problem;
 
@@ -221,6 +235,7 @@ export default function App() {
                   stage1={feed.analysis?.stage1 ?? null}
                   stage2={feed.analysis?.stage2 ?? null}
                   revision={revision}
+                  scaleToLevels={freshness.state === "fresh"}
                 />
                 {bars.length === 0 && !subscribing && (
                   <p className="absolute inset-0 flex items-center justify-center
@@ -235,10 +250,12 @@ export default function App() {
               analysis={feed.analysis}
               symbol={symbol}
               interval={interval}
-              stale={stale}
-              driftAtr={driftAtr}
+              freshness={freshness}
             />
-            <DecisionCard stage2={feed.analysis?.stage2 ?? null} stale={stale} />
+            <DecisionCard
+              stage2={feed.analysis?.stage2 ?? null}
+              freshness={freshness}
+            />
             <ReasoningCard stage2={feed.analysis?.stage2 ?? null} />
           </div>
 

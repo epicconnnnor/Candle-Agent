@@ -54,7 +54,8 @@ export default function ApiKeyField({
               value={apiKey}
               autoComplete="off"
               spellCheck={false}
-              placeholder="sk-..."
+              // not "sk-..." - that reads as a masked real key already set
+              placeholder="Paste your key"
               aria-label="Your LLM API key"
               onChange={(e) => {
                 onChange(e.target.value);

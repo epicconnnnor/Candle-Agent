@@ -107,10 +107,19 @@ export const subscribe = (body: SubscribeRequest) =>
 export const getBars = (symbol: string, limit = 200) =>
   request<BarRow[]>(`/api/bars/${encodeURIComponent(symbol)}?limit=${limit}`);
 
-/** 404 before the first analysis completes; null rather than throwing. */
-export const getAnalysis = async (symbol: string): Promise<StoredAnalysis | null> => {
+/**
+ * Latest stored analysis, scoped to an interval when given.
+ *
+ * 404 before the first analysis completes; null rather than throwing.
+ */
+export const getAnalysis = async (
+  symbol: string,
+  interval?: string,
+): Promise<StoredAnalysis | null> => {
+  const q = interval ? `?interval=${encodeURIComponent(interval)}` : "";
   try {
-    return await request<StoredAnalysis>(`/api/analysis/${encodeURIComponent(symbol)}`);
+    return await request<StoredAnalysis>(
+      `/api/analysis/${encodeURIComponent(symbol)}${q}`);
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) return null;
     throw e;
