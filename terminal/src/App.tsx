@@ -4,22 +4,28 @@ import TopBar from "./components/TopBar";
 import OhlcStrip from "./components/OhlcStrip";
 import Chart, { type ChartHandle } from "./components/Chart";
 import Stage1Panel from "./components/Stage1Panel";
-import LevelCards from "./components/LevelCards";
+import DecisionCard from "./components/DecisionCard";
+import ReasoningCard from "./components/ReasoningCard";
+import SessionCard from "./components/SessionCard";
+import LevelsCard from "./components/LevelsCard";
 import ChatPanel from "./components/ChatPanel";
 import SettingsModal from "./components/SettingsModal";
 import StatusBanner from "./components/StatusBanner";
 import Button from "./components/ui/Button";
+import Card from "./components/ui/Card";
 import { useAnalyze } from "./hooks/useAnalyze";
 import { useFeed } from "./hooks/useFeed";
 import { atr } from "./lib/indicators";
 import { loadRecent } from "./lib/recent";
-import { getAnalysis, getSymbols, hasStatus, subscribe } from "./api/client";
+import { getSymbols, hasStatus, subscribe } from "./api/client";
 import type { Bar, IngestStatus, Interval, SymbolInfo } from "./api/types";
 
 const FALLBACK_SYMBOL = import.meta.env.VITE_DEFAULT_SYMBOL ?? "AAPL";
 /** Reopen on the last symbol picked, so a reload keeps your place. */
 const INITIAL_SYMBOL = loadRecent()[0] ?? FALLBACK_SYMBOL;
 const FALLBACK_INTERVALS: Interval[] = ["1m", "5m", "15m", "1h", "4h", "1d"];
+/** Price drift, in ATRs, past which an analysis is marked stale. */
+const STALE_ATR_MULTIPLE = 2;
 
 export default function App() {
   const [symbol, setSymbol] = useState(INITIAL_SYMBOL);
@@ -31,6 +37,7 @@ export default function App() {
   const [subscribing, setSubscribing] = useState(false);
   const [fault, setFault] = useState<IngestStatus | null>(null);
   const [revision, setRevision] = useState(0);
+  const [source, setSource] = useState("—");
   const [settingsOpen, setSettingsOpen] = useState(false);
   // The visitor's LLM key. React state ONLY: never localStorage,
   // sessionStorage or a cookie, so a reload clears it. Deliberate - there
@@ -62,20 +69,13 @@ export default function App() {
           interval: nextInterval,
           source,
         });
-        const stored = await getAnalysis(res.symbol);
-        feed.reset(
-          res.bars,
-          stored
-            ? {
-                symbol: stored.symbol,
-                bar_ts: stored.ts,
-                stage1: stored.stage1,
-                stage2: stored.stage2,
-                model: stored.model,
-                latency_ms: stored.latency_ms,
-              }
-            : null,
-        );
+        // Deliberately NOT restoring the stored analysis. It was formed
+        // against a different symbol, interval or price, and rehydrating it
+        // put stale entry/stop/target lines on the chart - which then
+        // stretched the y-axis to reach them. A fresh one arrives on the
+        // next closed bar, or on demand via Analyze.
+        feed.reset(res.bars, null);
+        setSource(res.source);
         if (hasStatus(res.state)) feed.applyStatus(res.state);
         setRevision((r) => r + 1);          // tells the chart to setData once
       } catch (e) {
@@ -146,6 +146,14 @@ export default function App() {
   const changePct = last && prev && prev.close ? (change / prev.close) * 100 : 0;
   const atr14 = useMemo(() => atr(bars), [bars]);
 
+  // An analysis describes the market at one price. Once price has walked
+  // more than 2x ATR away from that, the levels it named are no longer a
+  // description of what is on screen - say so rather than showing them plain.
+  const drift =
+    last && feed.analysisPrice != null ? Math.abs(last.close - feed.analysisPrice) : 0;
+  const driftAtr = atr14 > 0 ? drift / atr14 : 0;
+  const stale = Boolean(feed.analysis) && driftAtr > STALE_ATR_MULTIPLE;
+
   const problem = fault ?? feed.notices.problem;
 
   return (
@@ -183,43 +191,71 @@ export default function App() {
       )}
 
       <main className="mx-auto flex max-w-[1400px] flex-col gap-4 px-4 py-4">
+        {/* alerts are global context like the strip above, not a module */}
         <StatusBanner
           problem={problem}
           market={feed.notices.market}
           backfill={feed.notices.backfill}
         />
 
-        {/* a subscribe dims the old chart rather than blanking the screen */}
-        <div
-          className={`relative h-[420px] overflow-hidden rounded-lg border border-border
-                      transition-opacity duration-200
-                      ${subscribing ? "pointer-events-none opacity-40" : "opacity-100"}`}
-        >
-          <Chart
-            ref={chart}
-            bars={bars}
-            stage1={feed.analysis?.stage1 ?? null}
-            stage2={feed.analysis?.stage2 ?? null}
-            revision={revision}
-          />
-          <Button
-            onClick={() => chart.current?.resetZoom()}
-            className="absolute top-3 left-3 z-10"
-          >
-            <Maximize2 size={16} />
-            Reset zoom
-          </Button>
-          {bars.length === 0 && !subscribing && (
-            <p className="absolute inset-0 flex items-center justify-center text-[13px] text-muted">
-              No bars for {symbol} {interval}.
-            </p>
-          )}
+        {/* main column and sidebar at 2:1; the sidebar stacks below 1100px */}
+        <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-[2fr_1fr]">
+          <div className="flex min-w-0 flex-col gap-4">
+            <Card
+              title={`${symbol} · ${interval}`}
+              action={
+                <Button onClick={() => chart.current?.resetZoom()}>
+                  <Maximize2 size={16} />
+                  Reset zoom
+                </Button>
+              }
+            >
+              {/* a subscribe dims the old chart rather than blanking it */}
+              <div
+                className={`relative h-[420px] overflow-hidden transition-opacity duration-200
+                            ${subscribing ? "pointer-events-none opacity-40" : "opacity-100"}`}
+              >
+                <Chart
+                  ref={chart}
+                  bars={bars}
+                  stage1={feed.analysis?.stage1 ?? null}
+                  stage2={feed.analysis?.stage2 ?? null}
+                  revision={revision}
+                />
+                {bars.length === 0 && !subscribing && (
+                  <p className="absolute inset-0 flex items-center justify-center
+                                font-sans text-[13px] text-muted">
+                    No bars for {symbol} {interval}.
+                  </p>
+                )}
+              </div>
+            </Card>
+
+            <Stage1Panel
+              analysis={feed.analysis}
+              symbol={symbol}
+              interval={interval}
+              stale={stale}
+              driftAtr={driftAtr}
+            />
+            <DecisionCard stage2={feed.analysis?.stage2 ?? null} stale={stale} />
+            <ReasoningCard stage2={feed.analysis?.stage2 ?? null} />
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-4">
+            <SessionCard
+              connection={feed.connection}
+              usingOwnKey={Boolean(apiKey)}
+              source={source}
+              lastBarTime={last?.time ?? null}
+            />
+            <LevelsCard
+              stage1={feed.analysis?.stage1 ?? null}
+              lastClose={last?.close ?? null}
+            />
+            <ChatPanel />
+          </div>
         </div>
-
-        <Stage1Panel analysis={feed.analysis} symbol={symbol} interval={interval} />
-        <LevelCards stage2={feed.analysis?.stage2 ?? null} />
-
-        <ChatPanel />
       </main>
 
       {settingsOpen && (
