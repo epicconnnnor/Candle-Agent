@@ -415,3 +415,22 @@ def test_analyze_still_works_without_an_event_callback():
     db.insert_bars("NOCB", "1m", ramp(60))
     result = analyze("NOCB", min_bars=30, llm=MockLLM())
     assert result["stage1"]["regime"]
+
+
+def test_delete_bars_is_scoped_to_one_symbol():
+    db.insert_bars("KEEPME", "1m", ramp(5))
+    db.insert_bars("DROPME", "1m", ramp(5))
+    db.insert_bars("DROPME", "5m", ramp(5))
+
+    removed = db.delete_bars("DROPME", "1m")
+
+    assert removed == 5
+    assert db.recent_bars("DROPME", interval="1m") == []
+    assert len(db.recent_bars("DROPME", interval="5m")) == 5   # other interval kept
+    assert len(db.recent_bars("KEEPME", interval="1m")) == 5   # other symbol kept
+
+
+def test_delete_bars_refuses_an_empty_symbol():
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        db.delete_bars("")
