@@ -132,6 +132,24 @@ def insert_bars(symbol, interval, bars):
         )
 
 
+def delete_bars(symbol, interval=None) -> int:
+    """Drop stored bars for a symbol, optionally one interval only.
+
+    Bars are derived data - re-fetchable from the source - so clearing and
+    refilling is the safe way to evict a contaminated series. Always
+    scoped to a symbol; there is deliberately no "delete everything".
+    """
+    if not symbol:
+        raise ValueError("delete_bars requires a symbol")
+    sql = "DELETE FROM bars WHERE symbol=?"
+    params = [symbol]
+    if interval:
+        sql += " AND interval=?"
+        params.append(interval)
+    with conn() as c:
+        return c.execute(sql, params).rowcount
+
+
 def active_interval(symbol):
     """The interval of the newest stored bar for a symbol, if any.
 
