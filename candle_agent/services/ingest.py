@@ -293,6 +293,16 @@ async def _on_control(msg):
     await msg.respond(json.dumps(reply).encode())
 
 
+async def _on_status_request(msg):
+    """What is ingest streaming right now? Replay asks before starting."""
+    await msg.respond(json.dumps({
+        "current": _current,
+        "streaming": bool(_task and not _task.done()),
+        "mode": config.INGEST_MODE,
+        "state": current_status(),
+    }).encode())
+
+
 async def main():
     global _nc, _js, _demo_source
 
@@ -306,6 +316,7 @@ async def main():
     print(f"[ingest] bus connected {config.NATS_URL}, mode={config.INGEST_MODE}")
 
     await _nc.subscribe(bus.INGEST_CONTROL, cb=_on_control)
+    await _nc.subscribe(bus.INGEST_CONTROL_STATUS, cb=_on_status_request)
     await switch(config.DEFAULT_SOURCE, config.SYMBOL, config.INTERVAL)
 
     try:

@@ -65,7 +65,15 @@ async def _handle(js, msg, forced: bool):
         # analyze() is sync (blocking LLM HTTP calls) -> run in a thread so
         # the event loop keeps servicing heartbeats and other messages.
         emit = _progress_emitter(asyncio.get_running_loop(), symbol)
-        result = await asyncio.to_thread(analyze, symbol, config.MIN_BARS, None, emit)
+        # Pass the message's bar timestamp as a no-lookahead bound. The
+        # analyzer cannot tell replay from live - it reads the same field
+        # from the same payload either way - and on the live path this
+        # closes a real gap: an analysis of bar N used to read whatever was
+        # newest in the table, which is a LATER bar whenever this consumer
+        # lagged ingest or JetStream redelivered. ts=0 (a manual
+        # analysis.request) means unbounded, i.e. "analyze now".
+        result = await asyncio.to_thread(
+            analyze, symbol, config.MIN_BARS, None, emit, ts or None)
         LLM_LATENCY.observe(time.time() - t0)
         _last_analyzed[symbol] = ts
         ANALYSES.labels(symbol=symbol,
