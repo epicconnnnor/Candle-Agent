@@ -316,6 +316,8 @@ class ReplayRequest(BaseModel):
     end: int = 2 ** 62
 
     max_analyses: int | None = None
+    # every Nth bar; 1 = every bar, which is the pre-stride behaviour
+    stride: int = Field(default=1, ge=1)
     dry_run: bool = False
 
 
@@ -325,6 +327,10 @@ async def start_replay(request: Request, req: ReplayRequest):
 
     max_analyses has no default on purpose: every bar costs an LLM call,
     so a run cannot begin without the caller naming a ceiling.
+
+    stride analyses every Nth bar. It defaults to 1, so existing callers
+    are unaffected; raising it buys forward windows that do not overlap,
+    which is what makes a run's results worth more than its row count.
     """
     _enforce_limit(request)
     if req.max_analyses is None:

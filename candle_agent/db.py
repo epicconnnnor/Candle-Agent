@@ -80,6 +80,10 @@ CREATE TABLE IF NOT EXISTS replay_runs (
     analyses_done INTEGER NOT NULL DEFAULT 0,
     estimated_tokens INTEGER,
     stop_requested INTEGER NOT NULL DEFAULT 0,
+    -- publish every Nth bar; 1 = every bar. Recorded per run because it
+    -- decides how much the scored forward windows overlap, and therefore
+    -- how many independent observations the run is actually worth.
+    stride INTEGER NOT NULL DEFAULT 1,
     detail TEXT
 );
 """
@@ -126,6 +130,13 @@ def _migrate(c):
         if analysis_cols and column not in analysis_cols:
             c.execute(f"ALTER TABLE analyses ADD COLUMN {column} INTEGER")
             print(f"[db] migrated analyses: added {column}")
+
+    # DEFAULT 1 is honest here, unlike price_at above: every run that
+    # predates this column really did publish every bar.
+    run_cols = _columns(c, "replay_runs")
+    if run_cols and "stride" not in run_cols:
+        c.execute("ALTER TABLE replay_runs ADD COLUMN stride INTEGER NOT NULL DEFAULT 1")
+        print("[db] migrated replay_runs: added stride")
 
     trade_cols = _columns(c, "paper_trades")
     if trade_cols and "replay_run_id" not in trade_cols:
@@ -283,7 +294,7 @@ def latest_analysis(symbol, interval=None):
 
 _RUN_COLS = ("symbol", "interval", "start_ts", "end_ts", "status", "bars_total",
              "bars_done", "model", "created_at", "max_analyses", "analyses_done",
-             "estimated_tokens", "stop_requested", "detail")
+             "estimated_tokens", "stop_requested", "stride", "detail")
 
 
 def create_replay_run(**fields) -> int:
@@ -292,6 +303,7 @@ def create_replay_run(**fields) -> int:
     row["status"] = row["status"] or "pending"
     for k in ("bars_done", "analyses_done", "stop_requested"):
         row[k] = row[k] or 0
+    row["stride"] = row["stride"] or 1
     cols = ", ".join(_RUN_COLS)
     marks = ", ".join("?" * len(_RUN_COLS))
     with conn() as c:

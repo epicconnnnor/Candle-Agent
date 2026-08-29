@@ -14,6 +14,15 @@ The no-lookahead guarantee has two halves:
     db.recent_bars via the as-of bound, which the analyzer takes from the
     message timestamp - the same field for replay and live.
 
+`stride` publishes every Nth bar instead of every one. It changes what
+is PUBLISHED, never what the model READS: the analyzer takes its history
+from db.recent_bars(as_of_ts=...), which reads the bars table, and every
+bar is still stored. So a strided run analyses a sparse set of decision
+points against a fully contiguous history. That matters because scoring
+walks a fixed window forward from each analysis - at stride 1 those
+windows overlap almost completely and consecutive rows are not
+independent observations, however many of them there are.
+
 Attribution is done here, not by the analyzer, precisely so the analyzer
 stays ignorant: after each bar, rows written since the run started are
 stamped with the run id.
@@ -97,6 +106,16 @@ def _validate(req: dict) -> tuple[dict | None, str | None]:
     if max_analyses <= 0:
         return None, "max_analyses must be greater than zero"
 
+    # No `or 1` fallback: a stride of 0 is a caller mistake, and silently
+    # reading it as "every bar" would hide it behind a run that looks fine.
+    raw_stride = req.get("stride")
+    try:
+        stride = 1 if raw_stride is None else int(raw_stride)
+    except (TypeError, ValueError):
+        return None, "stride must be a whole number"
+    if stride < 1:
+        return None, "stride must be at least 1 (1 = analyse every bar)"
+
     if config.ANALYZE_EVERY != 1:
         return None, (f"replay requires ANALYZE_EVERY=1, found "
                       f"{config.ANALYZE_EVERY}: the analyzer would skip bars and "
@@ -124,8 +143,13 @@ def _validate(req: dict) -> tuple[dict | None, str | None]:
                           "for warmup and one to analyse")
         bars = bars[needed:]
 
+    # Sliced AFTER the warmup trim so the first analysed bar is still the
+    # first bar with enough history behind it.
+    bars = bars[::stride]
+
     return {"symbol": symbol, "interval": interval, "bars": bars,
-            "max_analyses": max_analyses, "warmup_used": warmup}, None
+            "max_analyses": max_analyses, "warmup_used": warmup,
+            "stride": stride}, None
 
 
 def estimate(bars_total: int, max_analyses: int, model: str | None) -> dict:
@@ -230,7 +254,7 @@ async def _on_start(msg):
         symbol=parsed["symbol"], interval=parsed["interval"],
         start_ts=bars[0]["ts"], end_ts=bars[-1]["ts"], status="pending",
         bars_total=len(bars), max_analyses=parsed["max_analyses"],
-        estimated_tokens=est["estimated_tokens"])
+        stride=parsed["stride"], estimated_tokens=est["estimated_tokens"])
 
     _tasks[run_id] = asyncio.create_task(
         _run(run_id, parsed["symbol"], parsed["interval"], bars, parsed["max_analyses"]))
