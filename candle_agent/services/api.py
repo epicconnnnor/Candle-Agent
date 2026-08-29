@@ -18,11 +18,12 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from prometheus_client import make_asgi_app
 from pydantic import BaseModel, Field
 
-from .. import bus, config, db, intervals, security, sources, symbols
+from .. import bus, config, db, intervals, scoring, security, sources, symbols
 from ..llm import (LLMAuthFailed, LLMKeyRequired, LLMUpstreamError, get_llm)
 from ..orchestrator import analyze
 from ..paper import summarize
 from ..metrics import SSE_CLIENTS
+from . import scorer
 
 STATIC = pathlib.Path(__file__).parent.parent / "static"
 _clients: set[asyncio.Queue] = set()
@@ -372,6 +373,48 @@ async def stop_replay(run_id: int):
     if result.get("status") != "ok":
         raise HTTPException(404, result.get("message", "could not stop that run"))
     return result
+
+
+class ScoreRequest(BaseModel):
+    """Scoring is free - no LLM call - so unlike a replay it needs no cap."""
+
+    symbol: str = Field(min_length=1)
+    interval: str = config.INTERVAL
+    replay_run_id: int | None = None
+    start: int | None = None
+    end: int | None = None
+    # merged over scoring.DEFAULTS; an unknown key is an error, never
+    # silently dropped, or the scores would disagree with the parameters
+    # recorded next to them
+    params: dict = Field(default_factory=dict)
+
+
+@app.post("/api/score")
+async def start_score(request: Request, req: ScoreRequest):
+    """Score stored analyses against what happened next.
+
+    On demand only, and never coupled to replay finishing: every
+    threshold in the scoring layer is a judgement call, so re-running
+    with different parameters is the normal case rather than the
+    exception. Each run is a new row - old scores are not stale, they are
+    answers to a different question.
+    """
+    _enforce_limit(request)
+    try:
+        run = await asyncio.to_thread(
+            scorer.run, req.symbol, req.interval, req.replay_run_id,
+            req.params, req.start, req.end)
+    except scoring.ScoringError as e:
+        raise HTTPException(400, str(e)) from None
+    return run
+
+
+@app.get("/api/score/{score_run_id}")
+def score_detail(score_run_id: int):
+    run = db.get_score_run(score_run_id)
+    if not run:
+        raise HTTPException(404, f"no score run {score_run_id}")
+    return {**run, "scores": db.get_scores(score_run_id)}
 
 
 @app.get("/api/paper/{symbol}")
