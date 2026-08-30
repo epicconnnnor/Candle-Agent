@@ -13,7 +13,6 @@ import ChatPanel from "./components/ChatPanel";
 import SettingsModal from "./components/SettingsModal";
 import StatusBanner from "./components/StatusBanner";
 import PipelineStrip, { type Stage } from "./components/PipelineStrip";
-import MarketSummaryStrip from "./components/MarketSummaryStrip";
 import Button from "./components/ui/Button";
 import Card from "./components/ui/Card";
 import { useAnalyze } from "./hooks/useAnalyze";
@@ -203,25 +202,34 @@ export default function App() {
         ? { name: "Snapshot", state: "running", status: "building feature packet" }
         : { name: "Snapshot", state: "idle", status: "awaiting next run" };
 
+  // A pipeline cell reports where the run got to, never what it concluded.
+  // The verdict is in the cards below, once - repeating it here was the
+  // same answer in two places, drifting apart whenever one updated first.
+  const stage1Seconds =
+    prog.stage1At !== null && prog.snapshotAt !== null
+      ? (prog.stage1At - prog.snapshotAt) / 1000
+      : null;
+
   const diagnosisStage: Stage =
     prog.stage1At !== null
       ? { name: "Diagnosis", state: "done",
-          status: feed.analysis ? feed.analysis.stage1.regime.replace("_", " ") : "validated" }
+          status: stage1Seconds !== null ? `done · ${stage1Seconds.toFixed(1)}s` : "done" }
       : prog.snapshotAt !== null
         // snapshot landed, stage 1 has not: it is running right now
         ? { name: "Diagnosis", state: "running", status: "stage 1 running" }
         : feed.analysis
-          ? { name: "Diagnosis", state: "done", status: feed.analysis.stage1.regime.replace("_", " ") }
+          // restored from storage: it finished, but not in this session, so
+          // there is no elapsed time to report
+          ? { name: "Diagnosis", state: "done", status: "done" }
           : { name: "Diagnosis", state: "idle", status: "no analysis yet" };
 
   const decisionStage: Stage =
     prog.completedAt !== null && feed.analysis
-      ? { name: "Decision", state: "done",
-          status: `${feed.analysis.stage2.decision.replace("_", " ")} · ${feed.analysis.latency_ms} ms` }
+      ? { name: "Decision", state: "done", status: "done" }
       : prog.stage1At !== null
         ? { name: "Decision", state: "running", status: "stage 2 running" }
         : feed.analysis
-          ? { name: "Decision", state: "done", status: feed.analysis.stage2.decision.replace("_", " ") }
+          ? { name: "Decision", state: "done", status: "done" }
           : { name: "Decision", state: "idle", status: "no decision yet" };
 
   const stages: Stage[] = [
@@ -277,10 +285,6 @@ export default function App() {
         />
 
         <PipelineStrip stages={stages} lastEventAt={feed.lastEventAt} />
-        <MarketSummaryStrip
-          stage1={feed.analysis?.stage1 ?? null}
-          lastClose={last?.close ?? null}
-        />
 
         {/* main column and sidebar at 2:1; the sidebar stacks below 1100px */}
         <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-[2fr_1fr]">
