@@ -107,9 +107,17 @@ def resolve_params(overrides: dict | None = None) -> dict:
 def forward_measures(anchor: float, atr: float, bars: list[dict]) -> dict:
     """Everything the graders need about what happened next.
 
-    `bars` are the forward bars only. Excursions are signed: mfe >= 0,
-    mae <= 0. Everything is in ATR-at-decision units, which is what makes
-    rows comparable across symbols, price levels and volatility.
+    `bars` are the forward bars only. Everything is in ATR-at-decision
+    units, which is what makes rows comparable across symbols, price
+    levels and volatility.
+
+    Excursions are measured against the anchor and are NOT clamped at
+    zero. `fwd_mfe_atr` goes negative when the window's high never trades
+    back up to the anchor - a gap down, or an immediate decline - and
+    `fwd_mae_atr` goes positive in the mirror case. The invariant that
+    actually holds is `fwd_mfe_atr >= fwd_mae_atr`, and that
+    mae <= return <= mfe; neither excursion is bounded by zero. An
+    earlier version of this docstring claimed otherwise and was wrong.
     """
     if not bars or not atr or atr <= 0:
         return {"fwd_mfe_atr": None, "fwd_mae_atr": None, "fwd_return_atr": None,
@@ -129,6 +137,26 @@ def forward_measures(anchor: float, atr: float, bars: list[dict]) -> dict:
         "fwd_efficiency": round(abs(path[-1] - path[0]) / travelled, 4) if travelled else 0.0,
         "fwd_envelope_atr": round((max(highs) - min(lows)) / atr, 4),
     }
+
+
+def contiguous_prefix(bars: list[dict], interval_ms: int | None) -> list[dict]:
+    """Bars up to the first gap, exclusive of everything after it.
+
+    A forward window has to be N CONSECUTIVE bars to mean anything. The
+    bars table spans session breaks, and when a symbol has been reused for
+    demo data it spans outright instrument seams - a plain `LIMIT 30`
+    reads straight across both. An overnight gap inside a 1m window makes
+    every barrier trivially reachable and every regime look like a trend,
+    which silently inflates the base rate rather than raising an error.
+    """
+    if not bars or not interval_ms:
+        return list(bars)
+    out = [bars[0]]
+    for prev, cur in zip(bars, bars[1:]):
+        if cur["ts"] - prev["ts"] != interval_ms:
+            break
+        out.append(cur)
+    return out
 
 
 def classify_regime(measures: dict, params: dict) -> str | None:
@@ -455,7 +483,7 @@ def _blank_abstention() -> dict:
 
 # --- baselines: the numbers that make the rates mean anything -----------
 
-def baselines(bars: list[dict], params: dict) -> dict:
+def baselines(bars: list[dict], params: dict, interval_ms: int | None = None) -> dict:
     """Run both graders' tests over EVERY bar, not just decision bars.
 
     A miss rate without this is uninterpretable. If 40% of arbitrary bars
@@ -465,12 +493,17 @@ def baselines(bars: list[dict], params: dict) -> dict:
     horizon = int(params["horizon_bars"])
     atrs = atr_series(bars, 14)
     payable = long_paid = short_paid = 0
-    tested = 0
+    tested = skipped = 0
     regimes: dict[str, int] = {}
 
     for i, bar in enumerate(bars):
-        forward = bars[i + 1:i + 1 + horizon]
-        if len(forward) < horizon or not atrs[i] or atrs[i] <= 0:
+        forward = contiguous_prefix(bars[i + 1:i + 1 + horizon], interval_ms)
+        if len(forward) < horizon:
+            # either the series ran out or a gap cut the window short
+            if len(bars) - (i + 1) >= horizon:
+                skipped += 1
+            continue
+        if not atrs[i] or atrs[i] <= 0:
             continue
         tested += 1
         anchor, atr = bar["close"], atrs[i]
@@ -489,6 +522,9 @@ def baselines(bars: list[dict], params: dict) -> dict:
     majority = max(regimes.values()) / tested if tested and regimes else None
     return {
         "bars_tested": tested,
+        # windows that had enough bars but were cut short by a gap; a
+        # large number here means the series is not one continuous session
+        "windows_skipped_for_gaps": skipped,
         "payable_rate": round(payable / tested, 4) if tested else None,
         "payable_long_rate": round(long_paid / tested, 4) if tested else None,
         "payable_short_rate": round(short_paid / tested, 4) if tested else None,
@@ -496,6 +532,58 @@ def baselines(bars: list[dict], params: dict) -> dict:
         "majority_regime_rate": round(majority, 4) if majority else None,
         "majority_regime": max(regimes, key=regimes.get) if regimes else None,
     }
+
+
+def sweep_baselines(bars: list[dict], interval_ms: int | None,
+                    horizons, scales, base_params: dict | None = None) -> list[dict]:
+    """Base rate across a grid of horizons and barrier sizes.
+
+    The barrier pair is scaled as a UNIT - target 1.5k, stop 1.0k - so the
+    strategy's 1.5 reward:risk is preserved and only the size of the test
+    changes, not its shape. Scaling only the target would be sweeping a
+    different strategy, not calibrating this one.
+
+    Read the result as discriminating power. A base rate near 1.0 means
+    almost every bar "pays" and the abstention grader cannot tell a good
+    no_trade from a bad one; near 0.0 it fires too rarely to have any
+    resolution. Somewhere in the middle is where a miss carries
+    information.
+
+    Cheap enough to run freely: pure arithmetic over stored bars, no LLM.
+    """
+    base = dict(base_params or DEFAULTS)
+    atrs = atr_series(bars, 14)
+    out = []
+    for horizon in horizons:
+        horizon = int(horizon)
+        for scale in scales:
+            params = {**base, "horizon_bars": horizon,
+                      "target_atr": base["target_atr"] * scale,
+                      "stop_atr": base["stop_atr"] * scale}
+            tested = paid = skipped = 0
+            for i, bar in enumerate(bars):
+                forward = contiguous_prefix(bars[i + 1:i + 1 + horizon], interval_ms)
+                if len(forward) < horizon:
+                    if len(bars) - (i + 1) >= horizon:
+                        skipped += 1
+                    continue
+                if not atrs[i] or atrs[i] <= 0:
+                    continue
+                tested += 1
+                anchor, atr = bar["close"], atrs[i]
+                if (barrier_walk(anchor, atr, forward, True, params)[0] == "target"
+                        or barrier_walk(anchor, atr, forward, False, params)[0] == "target"):
+                    paid += 1
+            out.append({
+                "horizon_bars": horizon,
+                "scale": scale,
+                "target_atr": round(params["target_atr"], 3),
+                "stop_atr": round(params["stop_atr"], 3),
+                "bars_tested": tested,
+                "windows_skipped_for_gaps": skipped,
+                "payable_rate": round(paid / tested, 4) if tested else None,
+            })
+    return out
 
 
 # --- how much of a sample this actually is ------------------------------
@@ -585,6 +673,15 @@ def summarize(rows: list[dict], params: dict, interval_ms: int,
     regimes = [r for r in scored if r["regime_verdict"]]
     exact = sum(1 for r in regimes if r["regime_verdict"] == "exact")
 
+    # What a constant predictor would have scored ON THESE ROWS. It has to
+    # be the same population the accuracy is measured over: comparing 25
+    # scored rows against the majority class of a thousand other bars is
+    # comparing two different questions, and whichever way it lands the
+    # comparison is not evidence. The table-wide distribution is still
+    # reported, one field down, as context - never as the baseline.
+    realized_here = _counts(regimes, "realized_regime")
+    majority_here = (max(realized_here.values()) / len(regimes)) if realized_here else None
+
     return {
         "analyses": len(rows),
         "scored": len(scored),
@@ -617,7 +714,16 @@ def summarize(rows: list[dict], params: dict, interval_ms: int,
             "realized": _counts(scored, "realized_regime"),
             "exact": exact,
             "accuracy": round(exact / len(regimes), 4) if regimes else None,
-            "majority_baseline": (base or {}).get("majority_regime_rate"),
+            # same population as `accuracy`, so the two are comparable
+            "majority_baseline": round(majority_here, 4) if majority_here else None,
+            "majority_baseline_regime": (max(realized_here, key=realized_here.get)
+                                         if realized_here else None),
+            "beats_majority": (None if majority_here is None or not regimes
+                               else bool(exact / len(regimes) > majority_here)),
+            # a DIFFERENT population - every bar in the table. Context for
+            # how unusual this window was, not a baseline for the accuracy.
+            "table_wide_majority_rate": (base or {}).get("majority_regime_rate"),
+            "table_wide_majority_regime": (base or {}).get("majority_regime"),
             **_verdict("regime_accuracy", len(regimes), windows(regimes),
                        "a regime accuracy against the majority-class baseline"),
         },

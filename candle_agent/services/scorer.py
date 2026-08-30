@@ -28,6 +28,7 @@ def run(symbol: str, interval: str, replay_run_id: int | None = None,
     horizon = int(params["horizon_bars"])
     reach = horizon + int(params["fill_window_bars"])
 
+    interval_ms = to_ms(interval)
     analyses = db.analyses_for_scoring(symbol, interval, replay_run_id,
                                        start_ts, end_ts)
 
@@ -49,7 +50,8 @@ def run(symbol: str, interval: str, replay_run_id: int | None = None,
     for analysis in analyses:
         # STRICTLY after: the decision bar itself is history, and nothing
         # at or before it may be re-read here.
-        forward = db.bars_after(symbol, interval, analysis["ts"], limit=reach)
+        forward = scoring.contiguous_prefix(
+            db.bars_after(symbol, interval, analysis["ts"], limit=reach), interval_ms)
         decision_bar = None
         if analysis.get("price_at") is None:
             window = db.recent_bars(symbol, limit=1, interval=interval,
@@ -60,8 +62,8 @@ def run(symbol: str, interval: str, replay_run_id: int | None = None,
     db.insert_scores(run_id, rows)
 
     series = db.bars_in_range(symbol, interval, 0, 2 ** 62)
-    base = scoring.baselines(series, params)
-    summary = scoring.summarize(rows, params, to_ms(interval), base)
+    base = scoring.baselines(series, params, interval_ms)
+    summary = scoring.summarize(rows, params, interval_ms, base)
 
     db.update_score_run(
         run_id, status="completed",

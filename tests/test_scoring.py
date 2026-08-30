@@ -43,11 +43,14 @@ def flat(n, price=100.0, wobble=0.05, start_ts=START_TS):
 
 
 def climb(n, start=100.0, step=0.4, start_ts=START_TS):
+    """A steady drift. `step` may be negative - hence max/min rather than
+    assuming the close is the high, which silently produced bars with the
+    high below the low on a descending series."""
     hlc = []
     price = start
     for _ in range(n):
         nxt = price + step
-        hlc.append((nxt + 0.05, price - 0.05, nxt))
+        hlc.append((max(price, nxt) + 0.05, min(price, nxt) - 0.05, nxt))
         price = nxt
     return series(hlc, start_ts, open0=start)
 
@@ -211,6 +214,131 @@ def test_a_narrow_drift_is_chop():
 def test_the_confusion_matrix_collapses_by_what_the_error_costs(
         claimed, realized, expected):
     assert scoring.regime_verdict(claimed, realized) == expected
+
+
+# --- excursions: the invariant that actually holds -----------------------
+
+def test_mfe_goes_negative_when_price_never_trades_back_to_the_anchor():
+    """The docstring used to promise mfe >= 0 and mae <= 0. It was wrong,
+    and a real scored row (run 1, 14:02) had mfe = -0.32. Pinned so the
+    documentation cannot drift back."""
+    gapped_down = series([(99.0, 98.0, 98.5)] * 5, open0=99.0)
+    m = scoring.forward_measures(100.0, 1.0, gapped_down)
+
+    assert m["fwd_mfe_atr"] < 0, "high never reached the anchor, so mfe is negative"
+    assert m["fwd_mae_atr"] < 0
+
+
+def test_mae_goes_positive_in_the_mirror_case():
+    gapped_up = series([(102.0, 101.0, 101.5)] * 5, open0=102.0)
+    m = scoring.forward_measures(100.0, 1.0, gapped_up)
+
+    assert m["fwd_mae_atr"] > 0, "low never reached the anchor, so mae is positive"
+    assert m["fwd_mfe_atr"] > 0
+
+
+@pytest.mark.parametrize("bars", [
+    series([(99.0, 98.0, 98.5)] * 5, open0=99.0),          # entirely below
+    series([(102.0, 101.0, 101.5)] * 5, open0=102.0),      # entirely above
+    climb(5, step=0.4),                                     # straddling, up
+    climb(5, step=-0.4),                                    # straddling, down
+    flat(5),
+])
+def test_the_real_invariant_is_mae_le_return_le_mfe(bars):
+    m = scoring.forward_measures(100.0, 1.0, bars)
+    assert m["fwd_mae_atr"] <= m["fwd_return_atr"] <= m["fwd_mfe_atr"]
+
+
+# --- windows may not span a gap -----------------------------------------
+
+def test_contiguous_prefix_stops_at_the_first_gap():
+    bars = flat(3) + flat(3, start_ts=START_TS + 40 * STEP_MS)
+    got = scoring.contiguous_prefix(bars, STEP_MS)
+    assert len(got) == 3
+    assert got[-1]["ts"] == START_TS + 2 * STEP_MS
+
+
+def test_a_series_with_no_gap_is_returned_whole():
+    bars = flat(6)
+    assert len(scoring.contiguous_prefix(bars, STEP_MS)) == 6
+
+
+def test_the_baseline_skips_windows_a_gap_cut_short_and_counts_them():
+    """A 1m window that reads across an overnight gap makes every barrier
+    trivially reachable. Skipping is right; skipping SILENTLY is not."""
+    clean = climb(40, step=0.05)
+    after_gap = climb(40, step=0.05, start_ts=START_TS + 5000 * STEP_MS)
+    base = scoring.baselines(clean + after_gap, P, STEP_MS)
+
+    assert base["windows_skipped_for_gaps"] > 0
+    assert base["bars_tested"] > 0
+
+
+def test_a_forward_window_truncated_by_a_gap_is_insufficient_not_wrong(fresh):
+    """The scorer must refuse the row rather than score it across the gap."""
+    bars = climb(12, step=0.4) + climb(12, step=0.4, start_ts=START_TS + 900 * STEP_MS)
+    db.insert_bars(SYMBOL, "1m", bars)
+    a = analysis(ts=bars[9]["ts"], price=bars[9]["close"])
+    db.insert_analysis(SYMBOL, a["ts"], a["stage1"], a["stage2"], "test", 1,
+                       "1m", price_at=a["price_at"], atr_at=a["atr_at"])
+
+    run = scorer.run(SYMBOL, "1m", overrides={"horizon_bars": 5,
+                                              "fill_window_bars": 3})
+    row = db.get_scores(run["id"])[0]
+    assert row["bars_available"] == 2, "only the bars before the gap are readable"
+    assert row["complete"] == 0
+
+
+# --- the majority baseline must be the same population -------------------
+
+def test_the_majority_baseline_comes_from_the_rows_being_scored():
+    """Comparing 25 scored rows against the majority class of a thousand
+    OTHER bars compares two different questions. Whichever way it lands,
+    it is not evidence."""
+    rows = scored_rows(n=6, stride=10)          # a clean ramp: all bull_trend
+    table_wide = {"majority_regime_rate": 0.9, "majority_regime": "chop"}
+    summary = scoring.summarize(rows, P, STEP_MS, table_wide)
+
+    realized = summary["regime"]["realized"]
+    expected = max(realized.values()) / sum(realized.values())
+    assert summary["regime"]["majority_baseline"] == pytest.approx(expected)
+    assert summary["regime"]["majority_baseline_regime"] == "bull_trend"
+    # the table-wide figure is kept, but never as the baseline
+    assert summary["regime"]["table_wide_majority_rate"] == 0.9
+    assert summary["regime"]["table_wide_majority_regime"] == "chop"
+    assert summary["regime"]["majority_baseline"] != 0.9
+
+
+def test_beats_majority_is_reported_against_the_same_population():
+    rows = scored_rows(n=6, stride=10)
+    summary = scoring.summarize(rows, P, STEP_MS, None)
+    r = summary["regime"]
+    assert r["beats_majority"] == (r["accuracy"] > r["majority_baseline"])
+
+
+# --- the sweep -----------------------------------------------------------
+
+def test_bigger_barriers_are_reached_less_often():
+    """The sweep is only useful if it is monotone in the obvious
+    direction; if it is not, the walk is wrong."""
+    bars = climb(120, step=0.05)
+    grid = scoring.sweep_baselines(bars, STEP_MS, horizons=[30], scales=[1, 2, 4])
+    rates = [cell["payable_rate"] for cell in grid]
+    assert rates == sorted(rates, reverse=True), rates
+
+
+def test_the_sweep_preserves_the_strategy_reward_to_risk():
+    grid = scoring.sweep_baselines(flat(80), STEP_MS, horizons=[10], scales=[1, 2, 3])
+    for cell in grid:
+        assert cell["target_atr"] / cell["stop_atr"] == pytest.approx(1.5)
+
+
+def test_the_sweep_covers_the_whole_grid():
+    grid = scoring.sweep_baselines(climb(80, step=0.1), STEP_MS,
+                                   horizons=[5, 10], scales=[1, 2])
+    assert len(grid) == 4
+    assert {(c["horizon_bars"], c["scale"]) for c in grid} == {
+        (5, 1), (5, 2), (10, 1), (10, 2)}
 
 
 # --- how much of a sample this is ---------------------------------------
