@@ -27,6 +27,40 @@ PROMPTS = pathlib.Path(__file__).parent / "prompts"
 # populations. This way a new file is covered by default, and the worst
 # case is an unnecessary reset rather than a wrong number.
 NON_CONTRACT_PROMPTS = frozenset({"followup_chat.txt"})
+
+# Strategy documents. Static and ordered - no retrieval, no selection.
+# A prompt assembled from a fixed list is a prompt the same bar rebuilds
+# identically tomorrow, which is what makes a replay reproducible; a
+# retrieved one is not, and would have to be recorded per analysis before
+# any run could be repeated.
+DOCS = PROMPTS / "docs"
+
+DECISION_TREE = "06-decision-tree.md"
+
+# Stage 1 describes the market, so it gets the recognition docs and the
+# half of the decision tree that stops before any trade is considered.
+STAGE1_DOCS = ("01-trend-recognition.md", "02-range-recognition.md",
+               "03-cycle.md", DECISION_TREE)
+
+# Stage 2 gets the other half of the tree plus exactly ONE playbook,
+# chosen by the regime stage 1 committed to. One, not both: handing it the
+# range playbook alongside the trend one would let it pick its strategy
+# after the fact, which is the thing the two-stage split exists to prevent.
+STRATEGY_DOCS = {
+    "bull_trend": "04-trend-strategy.md",
+    "bear_trend": "04-trend-strategy.md",
+    "range": "05-range-strategy.md",
+    # chop is not short-circuited: it takes the range playbook and is
+    # declined there by the level-proximity gate, so the refusal is
+    # observed rather than constructed.
+    "chop": "05-range-strategy.md",
+}
+
+# Between assembled parts, so a doc boundary is visible to the model
+SEPARATOR = "\n\n---\n\n"
+
+_STAGE1_HEADING = "## Stage 1 — describe only"
+_STAGE2_HEADING = "## Stage 2 — decide"
 MAX_RETRIES = 2
 
 ROUTES = {
@@ -39,6 +73,59 @@ ROUTES = {
 
 def _prompt(name):
     return (PROMPTS / name).read_text()
+
+
+def _doc(name: str) -> str:
+    return (DOCS / name).read_text(encoding="utf-8")
+
+
+def _decision_tree_halves() -> tuple[str, str]:
+    """Doc 06 split at its own stage headings, preamble shared by both.
+
+    The split is on headings the document itself declares, so it cannot
+    drift from the prose: if the headings are ever renamed this raises
+    rather than silently handing stage 1 the trade gates.
+    """
+    text = _doc(DECISION_TREE)
+    try:
+        i1 = text.index(_STAGE1_HEADING)
+        i2 = text.index(_STAGE2_HEADING)
+    except ValueError as e:
+        raise RuntimeError(
+            f"{DECISION_TREE} no longer contains both stage headings, so it "
+            "cannot be split; fix the document or the constants above") from e
+    preamble = text[:i1]
+    return preamble + text[i1:i2], preamble + text[i2:]
+
+
+def assemble(stage: str, regime: str | None = None) -> tuple[str, list[str]]:
+    """The system prompt for a stage, and the doc ids that composed it.
+
+    Deterministic by construction: a fixed tuple for stage 1, and for
+    stage 2 a lookup on the regime stage 1 already committed to. The ids
+    are returned rather than inferred later, so an analysis row can record
+    exactly what it was assembled from.
+
+    The .txt contract goes LAST. The docs are how to think; the contract
+    is the shape of the answer, and it should be the final instruction
+    read rather than something buried behind ten pages of background.
+    """
+    stage1_tree, stage2_tree = _decision_tree_halves()
+
+    if stage == "stage1":
+        # the tree is named by the half that was used: it contributes to
+        # both prompts, and a row listing the same file twice reads as a
+        # bug rather than as the two halves it actually is
+        ids = [n for n in STAGE1_DOCS if n != DECISION_TREE]
+        ids.append(f"{DECISION_TREE}#stage1")
+        parts = [_doc(n) for n in STAGE1_DOCS[:-1]] + [stage1_tree]
+        parts.append(_prompt("stage1_diagnose.txt"))
+        return SEPARATOR.join(parts), ids
+
+    playbook = STRATEGY_DOCS[regime]
+    ids = [f"{DECISION_TREE}#stage2", playbook]
+    parts = [stage2_tree, _doc(playbook), _prompt(ROUTES[regime])]
+    return SEPARATOR.join(parts), ids
 
 
 def prompt_fingerprint() -> str:
@@ -70,9 +157,25 @@ def prompt_fingerprint() -> str:
     for path in contract_prompts():
         h.update(path.name.encode())
         h.update(path.read_bytes())
+    # the strategy documents, by name and content: editing one changes what
+    # the model was taught as surely as editing a prompt does
+    for path in contract_docs():
+        h.update(path.name.encode())
+        h.update(path.read_bytes())
+    # and the map deciding which of them a regime is shown - the same docs
+    # wired differently is a different contract
+    h.update(json.dumps({"stage1": list(STAGE1_DOCS),
+                         "strategy": STRATEGY_DOCS,
+                         "routes": ROUTES}, sort_keys=True).encode())
     for name, value in validator_gates():
         h.update(f"{name}={value}".encode())
     return h.hexdigest()[:16]
+
+
+def contract_docs() -> list[pathlib.Path]:
+    """Every strategy document, sorted so the hash cannot depend on the
+    order the filesystem happens to list them in."""
+    return sorted(DOCS.glob("*.md"))
 
 
 def contract_prompts() -> list[pathlib.Path]:
@@ -185,8 +288,8 @@ def analyze(symbol: str, min_bars: int = 30, llm=None, on_event=None,
     llm = llm or get_llm()
     t0 = time.time()
 
-    stage1 = _call_validated(llm, _prompt("stage1_diagnose.txt"), user_ctx,
-                             STAGE1_SCHEMA,
+    stage1_system, stage1_docs = assemble("stage1")
+    stage1 = _call_validated(llm, stage1_system, user_ctx, STAGE1_SCHEMA,
                              extra_check=stage1_consistency_errors)
     # validated, and before stage 2 has started
     emit("analysis.stage1.completed", {
@@ -196,14 +299,14 @@ def analyze(symbol: str, min_bars: int = 30, llm=None, on_event=None,
         "stage1": stage1,
     })
 
-    route = ROUTES[stage1["regime"]]
+    stage2_system, stage2_docs = assemble("stage2", stage1["regime"])
     stage2_user = f"Stage-1 diagnosis:\n{json.dumps(stage1)}\n\n{user_ctx}"
     # the checklist is checked against the geometry, so the check needs the
     # same numbers the model was shown - the diagnosis it must agree with,
     # the ATR its stop is measured in, and the price level_proximity falls
     # back to when there is no entry
     stage2 = _call_validated(
-        llm, _prompt(route), stage2_user, STAGE2_SCHEMA,
+        llm, stage2_system, stage2_user, STAGE2_SCHEMA,
         extra_check=lambda d: consistency_errors(
             d, stage1, packet["atr14"], packet["last_close"]),
     )
@@ -230,5 +333,8 @@ def analyze(symbol: str, min_bars: int = 30, llm=None, on_event=None,
                        envelope_at=packet["envelope_atr"],
                        prompt_tokens=prompt_tokens,
                        completion_tokens=completion_tokens,
-                       prompt_fingerprint=prompt_fingerprint())
+                       prompt_fingerprint=prompt_fingerprint(),
+                       # what this verdict was assembled from, recorded
+                       # rather than re-derived: the map can change under it
+                       doc_ids=stage1_docs + stage2_docs)
     return {"stage1": stage1, "stage2": stage2, "model": llm.model, "latency_ms": latency_ms}

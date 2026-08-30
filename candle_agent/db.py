@@ -61,7 +61,12 @@ CREATE TABLE IF NOT EXISTS analyses (
     completion_tokens INTEGER,
     -- identity of the prompt/schema/validator contract this verdict was
     -- formed under. Two analyses are only comparable when these match.
-    prompt_fingerprint TEXT
+    prompt_fingerprint TEXT,
+    -- JSON array of the strategy documents this verdict was assembled
+    -- from, in order. The fingerprint says the contract matched; this says
+    -- which docs were actually in the prompt, which is what you want when
+    -- one of six turns out to be the problem.
+    doc_ids TEXT
 );
 CREATE TABLE IF NOT EXISTS paper_trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -265,6 +270,9 @@ def _migrate(c):
     if analysis_cols and "prompt_fingerprint" not in analysis_cols:
         c.execute("ALTER TABLE analyses ADD COLUMN prompt_fingerprint TEXT")
         print("[db] migrated analyses: added prompt_fingerprint")
+    if analysis_cols and "doc_ids" not in analysis_cols:
+        c.execute("ALTER TABLE analyses ADD COLUMN doc_ids TEXT")
+        print("[db] migrated analyses: added doc_ids")
 
     # DEFAULT 1 is honest here, unlike price_at above: every run that
     # predates this column really did publish every bar.
@@ -468,7 +476,7 @@ def bars_in_range(symbol, interval, start_ts, end_ts, include_synthetic=None):
 def insert_analysis(symbol, ts, stage1, stage2, model, latency_ms, interval="1m",
                     price_at=None, atr_at=None, envelope_at=None,
                     prompt_tokens=None, completion_tokens=None,
-                    prompt_fingerprint=None):
+                    prompt_fingerprint=None, doc_ids=None):
     """`price_at` / `atr_at` capture the market at the moment of analysis, so
     staleness can be judged later without guessing.
 
@@ -481,11 +489,12 @@ def insert_analysis(symbol, ts, stage1, stage2, model, latency_ms, interval="1m"
         cur = c.execute(
             "INSERT INTO analyses (symbol, ts, stage1, stage2, model, latency_ms, "
             "interval, price_at, atr_at, envelope_at, prompt_tokens, "
-            "completion_tokens, prompt_fingerprint) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "completion_tokens, prompt_fingerprint, doc_ids) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (symbol, ts, json.dumps(stage1), json.dumps(stage2), model, latency_ms,
              interval, price_at, atr_at, envelope_at, prompt_tokens,
-             completion_tokens, prompt_fingerprint),
+             completion_tokens, prompt_fingerprint,
+             json.dumps(doc_ids) if doc_ids else None),
         )
         return cur.lastrowid
 
@@ -503,6 +512,7 @@ def latest_analysis(symbol, interval=None):
     d = dict(r)
     d["stage1"] = json.loads(d["stage1"])
     d["stage2"] = json.loads(d["stage2"])
+    d["doc_ids"] = json.loads(d["doc_ids"]) if d.get("doc_ids") else None
     return d
 
 
