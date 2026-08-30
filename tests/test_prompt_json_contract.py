@@ -196,3 +196,118 @@ def test_latest_analysis_is_scoped_by_interval(tmp_path, monkeypatch):
     assert db.latest_analysis("AAPL", "1m")["price_at"] == 100.0
     assert db.latest_analysis("AAPL", "5m")["price_at"] == 200.0
     assert db.latest_analysis("AAPL", "1h") is None
+
+
+# --- fingerprint coverage ----------------------------------------------
+#
+# This hash has been incomplete twice: once it globbed every *.txt and swept
+# in a prompt outside the contract, once it hashed one of three validator
+# gates. Neither was visible by reading it - an omission looks exactly like
+# a hash that has not changed. These tests fail instead.
+
+def _schema_constants():
+    """Module-level constants in schemas.py, discovered HERE.
+
+    Deliberately not orchestrator.validator_gates(): a test that asks the
+    code under test what it ought to cover cannot catch the code covering
+    too little. Narrowing validator_gates() narrowed this list with it,
+    and an earlier version of this test passed against a fingerprint that
+    had been made incomplete on purpose.
+    """
+    import types as _types
+
+    from candle_agent import schemas
+
+    return sorted(
+        name for name, value in vars(schemas).items()
+        if not name.startswith("__")
+        and name.lstrip("_").isupper()
+        and not callable(value)
+        and not isinstance(value, _types.ModuleType)
+    )
+
+
+def test_every_validator_constant_moves_the_fingerprint(monkeypatch):
+    """Adding a gate without covering it must break the build, not a sample."""
+    from candle_agent import orchestrator, schemas
+
+    names = _schema_constants()
+    assert names, "no validator constants discovered at all"
+
+    base = orchestrator.prompt_fingerprint()
+    for name in names:
+        monkeypatch.setattr(schemas, name, "MUTATED-FOR-TEST", raising=True)
+        assert orchestrator.prompt_fingerprint() != base, (
+            f"{name} is a module-level constant in schemas.py but changing it "
+            "does not change the fingerprint, so a sample could pool rows "
+            "validated under two different versions of it")
+        monkeypatch.undo()
+
+
+def test_a_new_validator_constant_is_covered_the_moment_it_exists(monkeypatch):
+    """The enumeration is the guarantee - not a hand-maintained list."""
+    from candle_agent import orchestrator, schemas
+
+    base = orchestrator.prompt_fingerprint()
+    monkeypatch.setattr(schemas, "MAX_SPREAD_ATR", 0.25, raising=False)
+
+    assert "MAX_SPREAD_ATR" in dict(orchestrator.validator_gates())
+    assert orchestrator.prompt_fingerprint() != base
+
+
+def test_every_prompt_is_either_contract_or_deliberately_excluded():
+    """A new prompt file cannot be silently outside the contract."""
+    from candle_agent.orchestrator import (NON_CONTRACT_PROMPTS, PROMPTS,
+                                           contract_prompts)
+
+    on_disk = {p.name for p in PROMPTS.glob("*.txt")}
+    covered = {p.name for p in contract_prompts()}
+    uncovered = on_disk - covered
+
+    assert uncovered == set(NON_CONTRACT_PROMPTS), (
+        f"{uncovered - set(NON_CONTRACT_PROMPTS)} are in the prompts directory "
+        "but neither fingerprinted nor listed in NON_CONTRACT_PROMPTS. Decide "
+        "which: a contract prompt must move the fingerprint.")
+    assert covered, "no contract prompts found"
+
+
+def test_editing_any_contract_prompt_moves_the_fingerprint():
+    """Enumerated from disk, not from contract_prompts(), for the same
+    reason the constants are: the code under test does not get to say
+    which files it is responsible for."""
+    from candle_agent import orchestrator
+    from candle_agent.orchestrator import NON_CONTRACT_PROMPTS, PROMPTS
+
+    base = orchestrator.prompt_fingerprint()
+    for path in sorted(PROMPTS.glob("*.txt")):
+        if path.name in NON_CONTRACT_PROMPTS:
+            continue
+        original = path.read_bytes()
+        try:
+            path.write_bytes(original + b"\n# edited by a test\n")
+            assert orchestrator.prompt_fingerprint() != base, (
+                f"editing {path.name} did not move the fingerprint")
+        finally:
+            path.write_bytes(original)
+    assert orchestrator.prompt_fingerprint() == base
+
+
+def test_the_chat_prompt_does_not_move_the_analysis_contract():
+    """It changes nothing about what stage 1 or stage 2 is asked."""
+    from candle_agent.orchestrator import PROMPTS, prompt_fingerprint
+
+    path = PROMPTS / "followup_chat.txt"
+    base = prompt_fingerprint()
+    original = path.read_bytes()
+    try:
+        path.write_bytes(original + b"\nAnswer briefly.\n")
+        assert prompt_fingerprint() == base
+    finally:
+        path.write_bytes(original)
+
+
+def test_the_fingerprint_is_stable_across_calls():
+    """Unordered constants must not leak set ordering into the hash."""
+    from candle_agent.orchestrator import prompt_fingerprint
+
+    assert len({prompt_fingerprint() for _ in range(5)}) == 1

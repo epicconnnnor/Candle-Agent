@@ -28,9 +28,10 @@ prompt ever reads. tests/test_scoring.py holds it to that, vacuity check
 included.
 """
 from . import paper
-from .features import atr as atr_series
+from .features import atr as atr_series, envelope_atr, nearest_level_distance
+from .schemas import PATH_NODES, consistency_errors
 
-SCORER_VERSION = "1"
+SCORER_VERSION = "2"
 
 TREND_REGIMES = ("bull_trend", "bear_trend")
 FLAT_REGIMES = ("range", "chop")
@@ -77,6 +78,26 @@ DEFAULTS = {
     # Only used to record how far a decision sat from its own diagnosed
     # key levels. The level grader itself is deliberately not built yet.
     "level_proximity_atr": 0.5,
+    # The cycle grader's amplitude band. A = forward envelope / the
+    # envelope stored on the analysis, so A >= k is expansion and A <= 1/k
+    # is contraction; between them is "steady".
+    #
+    # 1.10 was swept on MSFT 1m - a DIFFERENT instrument from the AAPL
+    # series it will be used to score, which is the one thing run 6's
+    # abstention barriers got wrong. Across 283 windows it minimises the
+    # majority-class baseline (0.569 at k=1.10, rising monotonically to
+    # 0.866 at k=2.5), which is the only property worth optimising: a k
+    # that lets one label swallow 90% of windows produces a baseline
+    # nothing can beat.
+    #
+    # Known limitation, recorded rather than tuned away: only ~11% of 1m
+    # windows are directional at trend_efficiency 0.35, so `trend` and
+    # `breakout` split a small population and `trend` is nearly
+    # unreachable at this k (1 of 283). On 1m equities in a rangebound
+    # week this is effectively a three-class grader. Re-sweep per
+    # instrument and interval; fwd_envelope_ratio is stored raw so it
+    # costs no LLM call.
+    "cycle_amplitude_k": 1.10,
     "secondary_horizons": (10, 60),
 }
 
@@ -187,6 +208,114 @@ def classify_regime(measures: dict, params: dict) -> str | None:
     if envelope >= params["range_envelope_atr"]:
         return "range"
     return "chop"
+
+
+# The four cycle labels are the corners of two binary facts, which is what
+# makes every one of them computable from price: is the amplitude
+# EXPANDING, and is price GOING ANYWHERE.
+CYCLE_EXPANDING = {"breakout": True, "exhaustion": True,
+                   "trend": False, "compression": False}
+CYCLE_DIRECTIONAL = {"breakout": True, "trend": True,
+                     "exhaustion": False, "compression": False}
+
+
+def classify_cycle(measures: dict, envelope_at, params: dict) -> str | None:
+    """The realized cycle phase, from price alone. No model output involved.
+
+    `envelope_at` is the amplitude of the window the analysis was shown,
+    stored on the analysis row. It is NOT recomputed here: the scorer
+    reads only bars after the analysis, and a backward read would be free
+    to drift from the window the verdict was formed against.
+    """
+    fwd = measures.get("fwd_envelope_atr")
+    efficiency = measures.get("fwd_efficiency")
+    if fwd is None or efficiency is None or not envelope_at or envelope_at <= 0:
+        return None
+
+    k = float(params["cycle_amplitude_k"])
+    ratio = fwd / envelope_at
+    directional = efficiency >= params["trend_efficiency"]
+
+    if ratio >= k:
+        return "breakout" if directional else "exhaustion"
+    if ratio <= 1 / k:
+        return "compression"
+    return "trend" if directional else "compression"
+
+
+def cycle_verdict(claimed: str | None, realized: str | None) -> str | None:
+    """Five errors that differ in what they cost, mirroring regime_verdict.
+
+    Both labels decompose into (expanding?, directional?), so the distance
+    between a claim and the truth is just which bits are wrong.
+    """
+    if claimed not in CYCLE_EXPANDING or realized not in CYCLE_EXPANDING:
+        return None
+    if claimed == realized:
+        return "exact"
+
+    amp_wrong = CYCLE_EXPANDING[claimed] != CYCLE_EXPANDING[realized]
+    dir_wrong = CYCLE_DIRECTIONAL[claimed] != CYCLE_DIRECTIONAL[realized]
+
+    if amp_wrong and dir_wrong:
+        return "phase_inversion"      # wrong on both axes; nothing survives it
+    if amp_wrong:
+        return "amplitude_error"      # right about direction, wrong about scale
+    # direction is the wrong bit; which way it is wrong is what it costs
+    return ("direction_overcall" if CYCLE_DIRECTIONAL[claimed]
+            else "direction_undercall")
+
+
+def score_path(stage1: dict, stage2: dict, anchor, atr, params: dict) -> dict:
+    """Per-node verdicts for the decision checklist.
+
+    Not a forward-looking grader: it asks whether the model's own answers
+    match the numbers it returned in the same breath, which is decidable
+    the instant the reply lands. The sample is therefore every analysis
+    that carries a path, and every node it answered - a much larger n than
+    the trade grader will reach for a long time.
+
+    Each node scores `agree`, `contradicted`, or `unchecked`. `unchecked`
+    is honest rather than lazy: a no_trade has no entry, so three of the
+    four questions have no geometry to test, and stop_placement's "beyond
+    a real swing" needs swing detection this codebase does not have.
+    """
+    path = stage2.get("decision_path")
+    if not path:
+        return {"path_nodes_answered": None, "path_contradictions": None,
+                "path_json": None}
+
+    answers = {step.get("node"): step.get("answer") for step in path
+               if isinstance(step, dict)}
+    reference = stage2.get("entry")
+    if reference is None:
+        reference = anchor
+    errs = consistency_errors(stage2, stage1, atr, anchor)
+
+    verdicts, contradicted = {}, 0
+    for node in PATH_NODES:
+        answer = answers.get(node)
+        if answer is None:
+            verdicts[node] = None
+            continue
+        hit = any(node in e for e in errs)
+        if hit:
+            verdicts[node] = "contradicted"
+            contradicted += 1
+        elif answer == "na":
+            verdicts[node] = "unchecked"
+        else:
+            verdicts[node] = "agree"
+
+    answered = sum(1 for v in verdicts.values() if v in ("agree", "contradicted"))
+    return {
+        "path_nodes_answered": answered,
+        "path_contradictions": contradicted,
+        "path_json": {"answers": answers, "verdicts": verdicts,
+                      "distance_atr": nearest_level_distance(
+                          reference, atr, stage1.get("key_levels"))
+                      if reference and atr else None},
+    }
 
 
 def regime_verdict(claimed: str | None, realized: str | None) -> str | None:
@@ -404,21 +533,6 @@ def _exit_index(bars: list[dict], trade: dict) -> int | None:
 
 # --- one analysis -------------------------------------------------------
 
-def nearest_level_distance(price: float, atr: float, levels) -> float | None:
-    """How far the decision sat from its own diagnosed key levels.
-
-    A hook, not a grader: the range playbook only allows entries near the
-    extremes, so a "missed" move from mid-range was never takeable. The
-    level grader itself is deliberately not built yet.
-    """
-    if not levels or not atr or atr <= 0:
-        return None
-    numeric = [float(x) for x in levels if isinstance(x, (int, float))]
-    if not numeric:
-        return None
-    return round(min(abs(price - x) for x in numeric) / atr, 4)
-
-
 def score_analysis(analysis: dict, forward_bars: list[dict], params: dict,
                    decision_bar: dict | None = None) -> dict:
     """One analysis, one score row. `forward_bars` must contain only bars
@@ -445,6 +559,14 @@ def score_analysis(analysis: dict, forward_bars: list[dict], params: dict,
         anchor or 0.0, 0.0, [])
     realized = classify_regime(measures, params) if complete else None
     claimed = stage1.get("regime")
+
+    # The cycle grader needs one more stored quantity than the regime
+    # grader. Rows written before it existed have None, so they score None
+    # and drop out - which is how run 6's population stays readable.
+    envelope_at = analysis.get("envelope_at")
+    claimed_cycle = stage1.get("cycle")
+    realized_cycle = (classify_cycle(measures, envelope_at, params)
+                      if complete else None)
 
     horizons = {}
     for n in params["secondary_horizons"]:
@@ -489,6 +611,15 @@ def score_analysis(analysis: dict, forward_bars: list[dict], params: dict,
             anchor, atr, stage1.get("key_levels")) if anchor and atr else None,
         "realized_regime": realized,
         "regime_verdict": regime_verdict(claimed, realized) if complete else None,
+        "envelope_at": envelope_at,
+        "fwd_envelope_ratio": (round(measures["fwd_envelope_atr"] / envelope_at, 4)
+                               if complete and envelope_at
+                               and measures.get("fwd_envelope_atr") is not None
+                               else None),
+        "claimed_cycle": claimed_cycle,
+        "realized_cycle": realized_cycle,
+        "cycle_verdict": cycle_verdict(claimed_cycle, realized_cycle),
+        **score_path(stage1, stage2, anchor, atr, params),
         **{k: v for k, v in _blank_trade().items() if k not in trade},
         **trade,
         **{k: v for k, v in _blank_abstention().items() if k not in abstention},
@@ -524,6 +655,7 @@ def baselines(bars: list[dict], params: dict, interval_ms: int | None = None) ->
     payable = long_paid = short_paid = 0
     tested = regime_tested = skipped = 0
     regimes: dict[str, int] = {}
+    cycles: dict[str, int] = {}
 
     for i, bar in enumerate(bars):
         if not atrs[i] or atrs[i] <= 0:
@@ -546,10 +678,17 @@ def baselines(bars: list[dict], params: dict, interval_ms: int | None = None) ->
 
         if len(forward) >= horizon:
             regime_tested += 1
-            realized = classify_regime(
-                forward_measures(anchor, atr, forward[:horizon]), params)
+            measures = forward_measures(anchor, atr, forward[:horizon])
+            realized = classify_regime(measures, params)
             if realized:
                 regimes[realized] = regimes.get(realized, 0) + 1
+            # the baseline's backward envelope may be recomputed here -
+            # there is no analysis for it to drift from, unlike in
+            # score_analysis where it must come off the stored row
+            prior = envelope_atr(bars[max(0, i - horizon + 1):i + 1], atr)
+            realized_cycle = classify_cycle(measures, prior, params)
+            if realized_cycle:
+                cycles[realized_cycle] = cycles.get(realized_cycle, 0) + 1
 
     majority = max(regimes.values()) / regime_tested if regime_tested and regimes else None
     return {
@@ -567,7 +706,36 @@ def baselines(bars: list[dict], params: dict, interval_ms: int | None = None) ->
         "regime_counts": regimes,
         "majority_regime_rate": round(majority, 4) if majority else None,
         "majority_regime": max(regimes, key=regimes.get) if regimes else None,
+        "cycle_counts": cycles,
+        "majority_cycle_rate": (round(max(cycles.values()) / sum(cycles.values()), 4)
+                                if cycles else None),
+        "majority_cycle": max(cycles, key=cycles.get) if cycles else None,
     }
+
+
+def sweep_cycle_k(bars: list[dict], interval_ms: int | None,
+                  ks, params: dict | None = None) -> list[dict]:
+    """Realized-cycle distribution across a grid of amplitude bands.
+
+    The point of choosing k is to land a grader that can be wrong. A k
+    that makes one label swallow 95% of windows produces a majority
+    baseline nothing can beat, which is the shape score run 6's regime
+    grader ran into - so this reports the majority rate at each k and the
+    caller picks before any model output is involved.
+
+    Run it on a DIFFERENT series from the one to be scored. Run 6's
+    abstention barriers were swept on the series they were then measured
+    against, and that caveat is still in the doc.
+    """
+    base = resolve_params(params)
+    out = []
+    for k in ks:
+        b = baselines(bars, {**base, "cycle_amplitude_k": float(k)}, interval_ms)
+        out.append({"k": float(k), "counts": b["cycle_counts"],
+                    "majority_rate": b["majority_cycle_rate"],
+                    "majority_cycle": b["majority_cycle"],
+                    "windows": sum(b["cycle_counts"].values())})
+    return out
 
 
 def sweep_baselines(bars: list[dict], interval_ms: int | None,
@@ -648,6 +816,9 @@ REQUIREMENTS = {
     "trade_win_rate": (100, 30),
     "abstention_lift": (20, 5),
     "regime_accuracy": (20, 5),
+    # Same shape as regime_accuracy: the same window, the same
+    # majority-baseline comparison, so the same evidence bar.
+    "cycle_accuracy": (20, 5),
     "regime_matrix": (480, 100),
     "confidence_calibration": (150, 50),
 }
@@ -714,6 +885,20 @@ def summarize(rows: list[dict], params: dict, interval_ms: int,
 
     regimes = [r for r in scored if r["regime_verdict"]]
     exact = sum(1 for r in regimes if r["regime_verdict"] == "exact")
+
+    cycles = [r for r in scored if r.get("cycle_verdict")]
+    cycle_exact = sum(1 for r in cycles if r["cycle_verdict"] == "exact")
+    realized_cycles = _counts(cycles, "realized_cycle")
+    cycle_majority = ((max(realized_cycles.values()) / len(cycles))
+                      if realized_cycles else None)
+
+    # The path grader does not need a complete forward window - it asks
+    # whether the reply contradicted itself, which was decidable the
+    # moment it landed. So it runs over every row, not just scored ones.
+    paths = [r for r in rows if r.get("path_nodes_answered") is not None]
+    contradicted = sum(1 for r in paths if (r.get("path_contradictions") or 0) > 0)
+    nodes_answered = sum(r.get("path_nodes_answered") or 0 for r in paths)
+    nodes_contradicted = sum(r.get("path_contradictions") or 0 for r in paths)
 
     # What a constant predictor would have scored ON THESE ROWS. It has to
     # be the same population the accuracy is measured over: comparing 25
@@ -786,5 +971,44 @@ def summarize(rows: list[dict], params: dict, interval_ms: int,
             "horizon_bars": horizon,
             **_verdict("regime_accuracy", len(regimes), windows(regimes),
                        "a regime accuracy against the majority-class baseline"),
+        },
+        "cycle": {
+            "verdicts": _counts(cycles, "cycle_verdict"),
+            "claimed": _counts(scored, "claimed_cycle"),
+            "realized": _counts(cycles, "realized_cycle"),
+            "exact": cycle_exact,
+            "accuracy": round(cycle_exact / len(cycles), 4) if cycles else None,
+            # same population as the accuracy, for the same reason it is
+            # for regime: a constant predictor measured on other rows is
+            # not a baseline, it is a different question
+            "majority_baseline": round(cycle_majority, 4) if cycle_majority else None,
+            "majority_baseline_cycle": (max(realized_cycles, key=realized_cycles.get)
+                                        if realized_cycles else None),
+            "beats_majority": (None if cycle_majority is None or not cycles
+                               else bool(cycle_exact / len(cycles) > cycle_majority)),
+            "amplitude_k": params["cycle_amplitude_k"],
+            "horizon_bars": horizon,
+            **_verdict("cycle_accuracy", len(cycles), windows(cycles),
+                       "a cycle accuracy against the majority-class baseline"),
+        },
+        "path": {
+            "rows_with_path": len(paths),
+            "rows_contradicted": contradicted,
+            "nodes_answered": nodes_answered,
+            "nodes_contradicted": nodes_contradicted,
+            "contradiction_rate": (round(nodes_contradicted / nodes_answered, 4)
+                                   if nodes_answered else None),
+            "by_node": {
+                node: _counts(
+                    [{"v": (r.get("path_json") or {}).get("verdicts", {}).get(node)}
+                     for r in paths], "v")
+                for node in PATH_NODES
+            },
+            # No independence caveat: this grader reads no forward window,
+            # so consecutive rows are not correlated through overlapping
+            # bars the way every other grader's are.
+            "note": ("self-consistency of the reply, not a forward-looking "
+                     "result: no forward window is read, so rows do not "
+                     "overlap and every answered node counts"),
         },
     }

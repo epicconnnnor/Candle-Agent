@@ -350,11 +350,17 @@ def test_progress_events_fire_in_order_and_before_stage_2(monkeypatch):
             stage = 1 if "STAGE-1" in system else 2
             timeline.append(f"llm:stage{stage}")
             if stage == 1:
-                return _json.dumps({"regime": "range", "strength": "weak",
+                return _json.dumps({"regime": "range", "cycle": "compression",
+                                    "strength": "weak",
                                     "key_levels": [1.0], "summary": "flat"})
             return _json.dumps({"decision": "no_trade", "entry": None, "stop": None,
                                 "target": None, "risk_reward": None,
-                                "confidence": "low", "reasoning_chain": ["none"]})
+                                "confidence": "low", "reasoning_chain": ["none"],
+                                "decision_path": [
+                    {"node": "trend_alignment", "answer": "na", "because": "no trade"},
+                    {"node": "level_proximity", "answer": "mid_range", "because": "no trade"},
+                    {"node": "stop_placement", "answer": "na", "because": "no trade"},
+                    {"node": "risk_reward", "answer": "na", "because": "no trade"}]})
 
     events: list[tuple[str, dict]] = []
 
@@ -611,3 +617,72 @@ def test_chat_pins_the_bar_table_in_a_single_system_message():
     assert sum(1 for m in msgs if "K1," in m["content"]) == 1
     assert "no_trade" in msgs[0]["content"]
     assert msgs[-1]["content"] == "why?"
+
+
+# --- stage 1 cycle + the decision checklist -----------------------------
+
+def test_stage1_rejects_a_cycle_that_contradicts_its_own_regime():
+    from candle_agent import schemas
+
+    assert schemas.stage1_consistency_errors(
+        {"regime": "bull_trend", "cycle": "compression"})
+    assert schemas.stage1_consistency_errors(
+        {"regime": "chop", "cycle": "breakout"})
+    assert schemas.stage1_consistency_errors(
+        {"regime": "range", "cycle": "compression"}) == []
+
+
+def test_the_checklist_must_be_the_checklist():
+    """Fixed nodes in a fixed order - a reordered path is not comparable."""
+    from candle_agent import schemas
+
+    scrambled = {"decision": "no_trade", "confidence": "low",
+                 "reasoning_chain": ["x"],
+                 "decision_path": [
+                     {"node": "risk_reward", "answer": "na", "because": "x"},
+                     {"node": "level_proximity", "answer": "na", "because": "x"},
+                     {"node": "stop_placement", "answer": "na", "because": "x"},
+                     {"node": "trend_alignment", "answer": "na", "because": "x"}]}
+    errs = schemas.consistency_errors(scrambled)
+    assert any("the checklist is fixed" in e for e in errs)
+
+
+def test_na_on_a_real_trade_is_evasion():
+    from candle_agent import schemas
+
+    dodged = {"decision": "buy_limit", "entry": 100.0, "stop": 99.0,
+              "target": 101.6, "confidence": "high", "reasoning_chain": ["x"],
+              "decision_path": [
+                  {"node": "trend_alignment", "answer": "na", "because": "x"},
+                  {"node": "level_proximity", "answer": "na", "because": "x"},
+                  {"node": "stop_placement", "answer": "na", "because": "x"},
+                  {"node": "risk_reward", "answer": "na", "because": "x"}]}
+    errs = schemas.consistency_errors(dodged)
+    assert sum("the question applies" in e for e in errs) == 3
+
+
+def test_a_stop_inside_the_noise_cannot_be_beyond_a_swing():
+    from candle_agent import schemas
+
+    tight = {"decision": "buy_limit", "entry": 100.0, "stop": 99.9,
+             "target": 100.25, "confidence": "high", "reasoning_chain": ["x"],
+             "decision_path": [
+                 {"node": "trend_alignment", "answer": "with_regime", "because": "x"},
+                 {"node": "level_proximity", "answer": "na", "because": "x"},
+                 {"node": "stop_placement", "answer": "beyond_swing", "because": "x"},
+                 {"node": "risk_reward", "answer": "pass", "because": "x"}]}
+    errs = schemas.consistency_errors(tight, {"regime": "bull_trend"}, atr=1.0)
+    assert any("inside the noise" in e for e in errs)
+
+
+def test_the_analysis_stores_the_envelope_the_cycle_claim_was_made_against():
+    from candle_agent.orchestrator import analyze
+    from candle_agent.llm import MockLLM
+
+    db.insert_bars("CYCSTORE", "1m", ramp(60), source="alpaca")
+    analyze("CYCSTORE", min_bars=30, llm=MockLLM())
+
+    row = db.latest_analysis("CYCSTORE", "1m")
+    assert row["envelope_at"] is not None
+    assert row["stage1"]["cycle"] in ("compression", "breakout", "trend", "exhaustion")
+    assert len(row["stage2"]["decision_path"]) == 4

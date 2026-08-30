@@ -9,8 +9,30 @@ this shape:
   "entry": number|null, "stop": number|null, "target": number|null,
   "risk_reward": number|null,
   "confidence": "low"|"medium"|"high",
-  "reasoning_chain": ["step 1", "step 2", ...]  // max 8 short steps
+  "reasoning_chain": ["step 1", "step 2", ...],  // max 8 short steps
+  "decision_path": [
+    {"node": "trend_alignment", "answer": "with_regime"|"against"|"na", "because": "..."},
+    {"node": "level_proximity", "answer": "at_level"|"mid_range"|"na", "because": "..."},
+    {"node": "stop_placement",  "answer": "beyond_swing"|"too_tight"|"na", "because": "..."},
+    {"node": "risk_reward",     "answer": "pass"|"fail"|"na", "because": "..."}
+  ]
 }
+
+The decision_path is a fixed checklist. All four nodes, always, in that
+order. It is checked against the numbers you return, so an answer that
+contradicts your own entry, stop, target or the diagnosed key_levels is
+an error and the whole reply is rejected:
+- trend_alignment: does the direction follow the diagnosed regime?
+- level_proximity: is the entry within 0.5x ATR14 of a diagnosed key
+  level? This one is NEVER "na" while stage 1 named any key_levels - on a
+  no_trade there is still a last close, so measure that instead.
+- stop_placement: is the stop at least 0.5x ATR14 from the entry?
+- risk_reward: does |target-entry| / |entry-stop| reach 1.5?
+Answer "na" only where the question genuinely does not apply - on a
+no_trade there is no entry, so the last three are "na". Never answer
+"na" on a real trade.
+The stage-1 "cycle" field is context: expansion favours breakout entries,
+compression favours patience. It does not override any gate below.
 
 Hard gates (violating any means "no_trade"):
 - Entries only near the diagnosed key_levels (range extremes).

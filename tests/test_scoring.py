@@ -750,8 +750,111 @@ def test_the_fingerprint_ignores_which_route_an_analysis_took():
 
 
 def test_moving_the_validator_gate_changes_the_fingerprint(monkeypatch):
-    from candle_agent import orchestrator
+    """The gates live in schemas.py; the fingerprint reads them from there.
+
+    Coverage of ALL of them is enforced in test_prompt_json_contract.py -
+    this is the one-case sanity check.
+    """
+    from candle_agent import orchestrator, schemas
 
     before = orchestrator.prompt_fingerprint()
-    monkeypatch.setattr(orchestrator, "MIN_RISK_REWARD", 2.0)
+    monkeypatch.setattr(schemas, "MIN_RISK_REWARD", 2.0)
     assert orchestrator.prompt_fingerprint() != before
+
+
+# --- cycle grader ------------------------------------------------------
+
+def _cycle_params(**over):
+    return scoring.resolve_params({"cycle_amplitude_k": 1.10, **over})
+
+
+def test_cycle_is_the_two_binary_facts_it_claims_to_be():
+    p = _cycle_params()
+    eff = p["trend_efficiency"]
+
+    def realized(ratio, efficiency, prior=10.0):
+        return scoring.classify_cycle(
+            {"fwd_envelope_atr": ratio * prior, "fwd_efficiency": efficiency},
+            prior, p)
+
+    assert realized(1.5, eff + 0.1) == "breakout"      # expanding, directional
+    assert realized(1.5, eff - 0.1) == "exhaustion"    # expanding, not
+    assert realized(1.0, eff + 0.1) == "trend"         # steady, directional
+    assert realized(1.0, eff - 0.1) == "compression"   # steady, not
+    assert realized(0.5, eff + 0.1) == "compression"   # contracting wins
+
+
+def test_cycle_returns_none_without_a_stored_envelope():
+    """Run 6's rows predate envelope_at, so they must drop out, not guess."""
+    p = _cycle_params()
+    measures = {"fwd_envelope_atr": 5.0, "fwd_efficiency": 0.9}
+    assert scoring.classify_cycle(measures, None, p) is None
+    assert scoring.classify_cycle(measures, 0, p) is None
+
+
+def test_cycle_verdict_costs_differ_by_which_bit_is_wrong():
+    assert scoring.cycle_verdict("trend", "trend") == "exact"
+    # wrong on both axes
+    assert scoring.cycle_verdict("breakout", "compression") == "phase_inversion"
+    assert scoring.cycle_verdict("trend", "exhaustion") == "phase_inversion"
+    # right about direction, wrong about scale
+    assert scoring.cycle_verdict("breakout", "trend") == "amplitude_error"
+    assert scoring.cycle_verdict("exhaustion", "compression") == "amplitude_error"
+    # right about scale, wrong about whether it goes anywhere
+    assert scoring.cycle_verdict("breakout", "exhaustion") == "direction_overcall"
+    assert scoring.cycle_verdict("exhaustion", "breakout") == "direction_undercall"
+
+
+def test_cycle_verdict_is_none_on_a_missing_side():
+    assert scoring.cycle_verdict(None, "trend") is None
+    assert scoring.cycle_verdict("trend", None) is None
+
+
+# --- decision-path grader ----------------------------------------------
+
+def _path(**answers):
+    base = {"trend_alignment": "na", "level_proximity": "mid_range",
+            "stop_placement": "na", "risk_reward": "na"}
+    base.update(answers)
+    return [{"node": n, "answer": base[n], "because": "x"}
+            for n in scoring.PATH_NODES]
+
+
+def test_path_grader_catches_a_node_the_geometry_contradicts():
+    stage1 = {"regime": "bear_trend", "cycle": "trend", "key_levels": [120.0]}
+    stage2 = {"decision": "buy_limit", "entry": 100.0, "stop": 99.0,
+              "target": 101.6, "confidence": "high", "reasoning_chain": ["x"],
+              "decision_path": _path(trend_alignment="with_regime",
+                                     level_proximity="mid_range",
+                                     stop_placement="beyond_swing",
+                                     risk_reward="pass")}
+
+    out = scoring.score_path(stage1, stage2, 100.0, 1.0, _cycle_params())
+
+    verdicts = out["path_json"]["verdicts"]
+    assert verdicts["trend_alignment"] == "contradicted"   # long in a bear trend
+    assert verdicts["risk_reward"] == "agree"              # 1.6 really does pass
+    assert out["path_contradictions"] == 1
+    assert out["path_nodes_answered"] == 4
+
+
+def test_path_grader_scores_a_no_trade_row_too():
+    """The sample is every analysis, not only the ones that traded."""
+    stage1 = {"regime": "range", "cycle": "compression", "key_levels": [100.0]}
+    stage2 = {"decision": "no_trade", "entry": None, "stop": None, "target": None,
+              "confidence": "low", "reasoning_chain": ["x"],
+              "decision_path": _path(level_proximity="at_level")}
+
+    out = scoring.score_path(stage1, stage2, 100.0, 1.0, _cycle_params())
+
+    # level_proximity falls back to the market price, so it is still checkable
+    assert out["path_json"]["verdicts"]["level_proximity"] == "agree"
+    assert out["path_json"]["verdicts"]["risk_reward"] == "unchecked"
+    assert out["path_nodes_answered"] == 1
+
+
+def test_path_grader_is_absent_not_zero_when_there_is_no_path():
+    stage2 = {"decision": "no_trade", "reasoning_chain": ["x"]}
+    out = scoring.score_path({}, stage2, 100.0, 1.0, _cycle_params())
+    assert out["path_nodes_answered"] is None
+    assert out["path_json"] is None

@@ -62,11 +62,17 @@ class RecordingLLM:
     def complete(self, system, user):
         self.prompts.append(user)
         if "STAGE-1" in system:
-            return json.dumps({"regime": "range", "strength": "weak",
+            return json.dumps({"regime": "range", "cycle": "compression",
+                               "strength": "weak",
                                "key_levels": [100.0], "summary": "flat"})
         return json.dumps({"decision": "no_trade", "entry": None, "stop": None,
                            "target": None, "risk_reward": None,
-                           "confidence": "low", "reasoning_chain": ["none"]})
+                           "confidence": "low", "reasoning_chain": ["none"],
+                           "decision_path": [
+                    {"node": "trend_alignment", "answer": "na", "because": "no trade"},
+                    {"node": "level_proximity", "answer": "mid_range", "because": "no trade"},
+                    {"node": "stop_placement", "answer": "na", "because": "no trade"},
+                    {"node": "risk_reward", "answer": "na", "because": "no trade"}]})
 
 
 # --- which bars get published -------------------------------------------

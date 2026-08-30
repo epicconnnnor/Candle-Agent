@@ -5,16 +5,28 @@ import hashlib
 import json
 import pathlib
 import time
+import types
 
 from jsonschema import validate, ValidationError
 
 from . import db
 from .features import build_feature_packet
 from .llm import get_llm
-from .schemas import (MIN_RISK_REWARD, STAGE1_SCHEMA, STAGE2_SCHEMA,
-                      consistency_errors, risk_reward)
+from . import schemas
+from .schemas import (STAGE1_SCHEMA, STAGE2_SCHEMA, consistency_errors,
+                      risk_reward, stage1_consistency_errors)
 
 PROMPTS = pathlib.Path(__file__).parent / "prompts"
+
+# Prompts that are NOT part of the analysis contract. Everything else in
+# the directory is, and is fingerprinted.
+#
+# Stated as an exclusion rather than a pattern on purpose. A pattern fails
+# unsafe: a new contract prompt named outside it is silently uncovered,
+# and the first symptom is a pooled sample that was quietly two
+# populations. This way a new file is covered by default, and the worst
+# case is an unnecessary reset rather than a wrong number.
+NON_CONTRACT_PROMPTS = frozenset({"followup_chat.txt"})
 MAX_RETRIES = 2
 
 ROUTES = {
@@ -41,27 +53,62 @@ def prompt_fingerprint() -> str:
       verdict with a `bull_trend` one. Hashing only the routed prompt
       would have split a sample by its own answers.
     - Editing any prompt, adding a schema field, or moving the
-      risk-reward floor changes it, because each of those changes what
-      the model was asked or what it was held to. A score run that pools
+      risk-reward, level-proximity or stop-distance gate changes it,
+      because each of those changes what the model was asked or what it
+      was held to. A score run that pools
       across such a change is pooling two different questions, and
       services/scorer.py refuses it.
 
-    The glob is `stage*.txt`, not `*.txt`, and the narrowness is the
-    point: the fingerprint covers the ANALYSIS contract. The follow-up
-    chat prompt lives in the same directory and deliberately does not
-    move it, because it changes nothing about what stage 1 or stage 2 is
-    asked or held to. A new file that does belong to the contract must be
-    named to match, which is a convention the reader can see rather than
-    a rule buried in a hash.
+    Both halves are enumerated, not listed. Listing them by hand is how
+    this hash has been wrong twice: once when it globbed every *.txt and
+    swept in a prompt that was not part of the contract, once when it
+    hashed only the first of three validator gates. Neither could be
+    caught by reading it, because an omission looks exactly like a hash
+    that has not changed.
     """
     h = hashlib.sha256()
-    for path in sorted(PROMPTS.glob("stage*.txt")):
+    for path in contract_prompts():
         h.update(path.name.encode())
         h.update(path.read_bytes())
-    for schema in (STAGE1_SCHEMA, STAGE2_SCHEMA):
-        h.update(json.dumps(schema, sort_keys=True).encode())
-    h.update(f"rr_floor={MIN_RISK_REWARD}".encode())
+    for name, value in validator_gates():
+        h.update(f"{name}={value}".encode())
     return h.hexdigest()[:16]
+
+
+def contract_prompts() -> list[pathlib.Path]:
+    """Every prompt file that forms part of the analysis contract."""
+    return sorted(p for p in PROMPTS.glob("*.txt")
+                  if p.name not in NON_CONTRACT_PROMPTS)
+
+
+def _canonical(value) -> str:
+    """A stable string for any constant a schema module might hold.
+
+    Sets have no order, so they are sorted before serialising - otherwise
+    the fingerprint would change between interpreter runs and every score
+    run would refuse to pool with itself.
+    """
+    if isinstance(value, (set, frozenset)):
+        value = sorted(value, key=str)
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def validator_gates() -> list[tuple[str, str]]:
+    """Every module-level constant in schemas.py, canonically serialised.
+
+    Enumerated from the module rather than named one by one, so a gate
+    added later is covered the moment it exists. Anything a reply is
+    validated against belongs here: the schemas themselves, the numeric
+    floors, and the checklist's own node and answer vocabularies.
+    """
+    out = []
+    for name, value in sorted(vars(schemas).items()):
+        if name.startswith("__") or not name.lstrip("_").isupper():
+            continue
+        if callable(value) or isinstance(value, types.ModuleType):
+            continue
+        out.append((name, _canonical(value)))
+    return out
 
 
 def _strip_fences(text):
@@ -138,7 +185,9 @@ def analyze(symbol: str, min_bars: int = 30, llm=None, on_event=None,
     llm = llm or get_llm()
     t0 = time.time()
 
-    stage1 = _call_validated(llm, _prompt("stage1_diagnose.txt"), user_ctx, STAGE1_SCHEMA)
+    stage1 = _call_validated(llm, _prompt("stage1_diagnose.txt"), user_ctx,
+                             STAGE1_SCHEMA,
+                             extra_check=stage1_consistency_errors)
     # validated, and before stage 2 has started
     emit("analysis.stage1.completed", {
         "symbol": symbol,
@@ -149,8 +198,14 @@ def analyze(symbol: str, min_bars: int = 30, llm=None, on_event=None,
 
     route = ROUTES[stage1["regime"]]
     stage2_user = f"Stage-1 diagnosis:\n{json.dumps(stage1)}\n\n{user_ctx}"
+    # the checklist is checked against the geometry, so the check needs the
+    # same numbers the model was shown - the diagnosis it must agree with,
+    # the ATR its stop is measured in, and the price level_proximity falls
+    # back to when there is no entry
     stage2 = _call_validated(
-        llm, _prompt(route), stage2_user, STAGE2_SCHEMA, extra_check=consistency_errors
+        llm, _prompt(route), stage2_user, STAGE2_SCHEMA,
+        extra_check=lambda d: consistency_errors(
+            d, stage1, packet["atr14"], packet["last_close"]),
     )
 
     # The model reports risk_reward as well as the prices, and the two do
@@ -170,6 +225,9 @@ def analyze(symbol: str, min_bars: int = 30, llm=None, on_event=None,
                        latency_ms, interval=interval,
                        # the same numbers the model was shown
                        price_at=packet["last_close"], atr_at=packet["atr14"],
+                       # the backward half of the cycle grader's amplitude
+                       # ratio, stored because the scorer may not look back
+                       envelope_at=packet["envelope_atr"],
                        prompt_tokens=prompt_tokens,
                        completion_tokens=completion_tokens,
                        prompt_fingerprint=prompt_fingerprint())

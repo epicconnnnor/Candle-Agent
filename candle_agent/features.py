@@ -54,6 +54,39 @@ def bar_geometry(bars):
     return out
 
 
+def nearest_level_distance(price: float, atr: float, levels) -> float | None:
+    """How far a price sits from the nearest diagnosed key level, in ATR.
+
+    Lives here rather than in scoring.py because the validator needs it
+    too, and the import must not run that way: scoring writes only to
+    score tables, and nothing it produces may ever reach a prompt. Pure
+    geometry over current data belongs with the other features, where
+    both sides can import it without inverting that rule.
+    """
+    if not levels or not atr or atr <= 0:
+        return None
+    numeric = [float(x) for x in levels if isinstance(x, (int, float))]
+    if not numeric:
+        return None
+    return round(min(abs(price - x) for x in numeric) / atr, 4)
+
+
+def envelope_atr(bars, atr_value) -> float | None:
+    """High-to-low range of a bar window, in ATR units.
+
+    The backward half of the cycle grader's amplitude ratio. It is
+    computed HERE, over exactly the bars the model was shown, and stored
+    on the analysis row - the scorer may not recompute it, because
+    scoring reads only bars strictly after the analysis and a
+    backward-looking read there could silently drift from the window the
+    verdict was actually formed against.
+    """
+    if not bars or not atr_value or atr_value <= 0:
+        return None
+    return round((max(b["high"] for b in bars)
+                  - min(b["low"] for b in bars)) / atr_value, 4)
+
+
 def build_feature_packet(bars, n_recent=30):
     """Everything stage 1 needs, as a compact text table. K1 = latest closed bar."""
     closes = [b["close"] for b in bars]
@@ -72,6 +105,9 @@ def build_feature_packet(bars, n_recent=30):
         )
     return {
         "bar_table": "\n".join(lines),
+        # the amplitude a cycle claim is made against, over exactly
+        # the window the table shows
+        "envelope_atr": envelope_atr(recent, round(atr14[-1], 2)),
         "ema20": round(ema20[-1], 2),
         "atr14": round(atr14[-1], 2),
         "last_close": closes[-1],

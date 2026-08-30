@@ -7,6 +7,7 @@ Respond with ONLY a JSON object, no markdown fences. The reply must be
 valid json, exactly this shape:
 {
   "regime": "bull_trend" | "bear_trend" | "range" | "chop",
+  "cycle": "compression" | "breakout" | "trend" | "exhaustion",
   "strength": "weak" | "moderate" | "strong",
   "key_levels": [numbers, at most 6, most important support/resistance],
   "summary": "one or two sentences citing specific bars, max 400 chars"
@@ -17,3 +18,13 @@ Rules:
   highs/lows, position relative to EMA20, breakout follow-through flags.
 - "chop" means small overlapping bars with no tradeable structure.
 - key_levels must come from actual swing highs/lows in the table.
+- "cycle" answers two questions at once, and the four values are every
+  combination of them:
+    is the range EXPANDING compared with the earlier bars in the table?
+    is price GOING ANYWHERE, or covering the same ground repeatedly?
+      compression = not expanding, not going anywhere
+      trend       = not expanding, going somewhere
+      breakout    = expanding, going somewhere
+      exhaustion  = expanding, NOT going anywhere (wide bars, no progress)
+- cycle and regime must agree: a bull_trend or bear_trend cannot be
+  "compression", and "chop" cannot be "trend" or "breakout".

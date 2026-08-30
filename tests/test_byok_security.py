@@ -49,13 +49,18 @@ def _completion(content: str) -> dict:
 
 
 STAGE1 = json.dumps({
-    "regime": "range", "strength": "moderate",
+    "regime": "range", "cycle": "compression", "strength": "moderate",
     "key_levels": [100.0, 110.0], "summary": "Balanced two-sided trade.",
 })
 STAGE2 = json.dumps({
     "decision": "no_trade", "entry": None, "stop": None, "target": None,
     "risk_reward": None, "confidence": "low",
     "reasoning_chain": ["no edge in a balanced range"],
+    "decision_path": [
+                    {"node": "trend_alignment", "answer": "na", "because": "no trade"},
+                    {"node": "level_proximity", "answer": "mid_range", "because": "no trade"},
+                    {"node": "stop_placement", "answer": "na", "because": "no trade"},
+                    {"node": "risk_reward", "answer": "na", "because": "no trade"}],
 })
 
 

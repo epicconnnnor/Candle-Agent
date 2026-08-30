@@ -58,6 +58,37 @@ cross-tabulable — they are different windows on the same decision.
 Cost: 105,665 tokens (96,686 prompt, 8,979 completion) over 33 analyses,
 3.8s average latency.
 
+## Pre-registered: the cycle grader's amplitude band
+
+Recorded **before** the first cycle-scored run, so it cannot be tuned to a
+result afterwards.
+
+`cycle_amplitude_k = 1.10`, swept with `sweep_cycle_k()` over **MSFT 1m,
+283 windows** — deliberately a different instrument from the AAPL series
+it will be used to score. That is the one thing the abstention barriers
+below got wrong, and it is not worth repeating.
+
+| k | majority baseline | breakout | compression | exhaustion | trend |
+| --- | --- | --- | --- | --- | --- |
+| **1.10** | **0.569** | 26 | 161 | 95 | 1 |
+| 1.30 | 0.728 | 25 | 206 | 46 | 6 |
+| 1.50 | 0.820 | 24 | 232 | 19 | 8 |
+| 2.00 | 0.852 | 19 | 241 | 10 | 13 |
+| 2.50 | 0.866 | 7 | 245 | 6 | 25 |
+
+1.10 minimises the majority-class baseline, which is the only property
+worth optimising — a k that lets one label take 90% of windows produces a
+baseline nothing can beat, which is precisely the trap the regime grader
+fell into above.
+
+**A limitation the sweep exposed, recorded rather than tuned away.** Only
+about 11% of 1m windows are directional at `trend_efficiency` 0.35, so
+`trend` and `breakout` split a small population however k is chosen, and
+at k=1.10 `trend` is nearly unreachable — 1 window of 283. On 1m equities
+in a rangebound stretch this is effectively a **three-class grader**. The
+amplitude ratio is stored raw, so k can be re-swept on any new instrument
+or interval without an LLM call.
+
 ## Caveats
 
 **The market barely moved.** 31 of 32 scored windows realized as `range`;
