@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS analyses (
     -- written before these existed genuinely do not know
     price_at REAL,
     atr_at REAL,
+    -- amplitude of the window the model was shown, in ATR. The scorer
+    -- cannot recompute it: it reads only bars after the analysis.
+    envelope_at REAL,
     -- null for live analyses; set for rows produced by a replay run
     replay_run_id INTEGER,
     -- measured from the provider's usage block, so cost estimates come
@@ -151,6 +154,15 @@ CREATE TABLE IF NOT EXISTS analysis_scores (
 
     realized_regime TEXT, regime_verdict TEXT,
 
+    -- cycle grader. The ratio is stored raw so the amplitude band k can be
+    -- re-swept later without an LLM call, per the rule at the top of
+    -- scoring.py: store measures, derive labels.
+    envelope_at REAL, fwd_envelope_ratio REAL,
+    claimed_cycle TEXT, realized_cycle TEXT, cycle_verdict TEXT,
+
+    -- decision-path grader. Counts here, per-node verdicts in the JSON.
+    path_nodes_answered INTEGER, path_contradictions INTEGER, path_json TEXT,
+
     UNIQUE (score_run_id, analysis_id)
 );
 """
@@ -228,7 +240,7 @@ def _migrate(c):
         print("[db] migrated analyses: added interval")
     # No DEFAULT: a pre-existing row must read NULL, not a fabricated price.
     # The UI shows those as "age unknown" rather than claiming freshness.
-    for column in ("price_at", "atr_at"):
+    for column in ("price_at", "atr_at", "envelope_at"):
         if analysis_cols and column not in analysis_cols:
             c.execute(f"ALTER TABLE analyses ADD COLUMN {column} REAL")
             print(f"[db] migrated analyses: added {column}")
@@ -246,6 +258,23 @@ def _migrate(c):
 
     # DEFAULT 1 is honest here, unlike price_at above: every run that
     # predates this column really did publish every bar.
+    # analysis_scores predates both new graders. Nullable throughout: a row
+    # scored before these columns existed has no cycle verdict, and that is
+    # a different fact from one whose verdict was None.
+    scores_cols = _columns(c, "analysis_scores")
+    if scores_cols:
+        for column, kind in (("envelope_at", "REAL"),
+                             ("fwd_envelope_ratio", "REAL"),
+                             ("claimed_cycle", "TEXT"),
+                             ("realized_cycle", "TEXT"),
+                             ("cycle_verdict", "TEXT"),
+                             ("path_nodes_answered", "INTEGER"),
+                             ("path_contradictions", "INTEGER"),
+                             ("path_json", "TEXT")):
+            if column not in scores_cols:
+                c.execute(f"ALTER TABLE analysis_scores ADD COLUMN {column} {kind}")
+                print(f"[db] migrated analysis_scores: added {column}")
+
     score_cols = _columns(c, "score_runs")
     if score_cols and "replay_run_ids" not in score_cols:
         c.execute("ALTER TABLE score_runs ADD COLUMN replay_run_ids TEXT")
@@ -427,7 +456,7 @@ def bars_in_range(symbol, interval, start_ts, end_ts, include_synthetic=None):
 
 
 def insert_analysis(symbol, ts, stage1, stage2, model, latency_ms, interval="1m",
-                    price_at=None, atr_at=None,
+                    price_at=None, atr_at=None, envelope_at=None,
                     prompt_tokens=None, completion_tokens=None,
                     prompt_fingerprint=None):
     """`price_at` / `atr_at` capture the market at the moment of analysis, so
@@ -441,12 +470,12 @@ def insert_analysis(symbol, ts, stage1, stage2, model, latency_ms, interval="1m"
     with conn() as c:
         cur = c.execute(
             "INSERT INTO analyses (symbol, ts, stage1, stage2, model, latency_ms, "
-            "interval, price_at, atr_at, prompt_tokens, completion_tokens, "
-            "prompt_fingerprint) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "interval, price_at, atr_at, envelope_at, prompt_tokens, "
+            "completion_tokens, prompt_fingerprint) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (symbol, ts, json.dumps(stage1), json.dumps(stage2), model, latency_ms,
-             interval, price_at, atr_at, prompt_tokens, completion_tokens,
-             prompt_fingerprint),
+             interval, price_at, atr_at, envelope_at, prompt_tokens,
+             completion_tokens, prompt_fingerprint),
         )
         return cur.lastrowid
 
@@ -570,6 +599,8 @@ _SCORE_COLS = (
     "r_multiple", "mtm_r", "trade_mae_r", "trade_mfe_r", "entry_distance_atr",
     "same_bar_ambiguous", "abstention_outcome", "missed_direction",
     "miss_aligned", "bars_to_payoff", "realized_regime", "regime_verdict",
+    "envelope_at", "fwd_envelope_ratio", "claimed_cycle", "realized_cycle",
+    "cycle_verdict", "path_nodes_answered", "path_contradictions", "path_json",
 )
 
 
@@ -671,6 +702,10 @@ def insert_scores(score_run_id: int, rows: list[dict]) -> int:
     for row in rows:
         r = {**row, "score_run_id": score_run_id}
         r["horizons_json"] = json.dumps(r.get("horizons_json") or {})
+        # None stays None: a row with no path is different from one whose
+        # path was empty, and the grader distinguishes them
+        r["path_json"] = (json.dumps(r["path_json"])
+                          if r.get("path_json") is not None else None)
         payload.append([r.get(k) for k in _SCORE_COLS])
     with conn() as c:
         c.executemany(f"INSERT INTO analysis_scores ({cols}) VALUES ({marks})",
@@ -687,6 +722,7 @@ def get_scores(score_run_id: int):
     for r in rows:
         d = dict(r)
         d["horizons_json"] = json.loads(d["horizons_json"]) if d["horizons_json"] else {}
+        d["path_json"] = json.loads(d["path_json"]) if d.get("path_json") else None
         out.append(d)
     return out
 

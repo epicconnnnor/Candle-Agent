@@ -48,8 +48,13 @@ class MockLLM:
             return json.dumps(
                 {
                     "regime": "bull_trend",
+                    "cycle": "trend",
                     "strength": "moderate",
-                    "key_levels": [round(close * 0.99, 2), round(close * 1.02, 2)],
+                    # the lower level IS the shallow-pullback entry stage 2
+                    # will pick, so the mock's own decision_path answer of
+                    # "at_level" is true rather than contrived - the mock
+                    # exists to exercise the pipeline, not the retry loop
+                    "key_levels": [round(close * 0.998, 2), round(close * 1.02, 2)],
                     "summary": "Higher lows, price holding above EMA20 (mock diagnosis).",
                 }
             )
@@ -67,6 +72,19 @@ class MockLLM:
                 "reasoning_chain": [
                     "pullback toward EMA20 in bull trend",
                     "prior breakout held (mock reasoning)",
+                ],
+                # the checklist the real model fills in; the mock's geometry
+                # is built to satisfy every gate so tests exercise the happy
+                # path rather than the retry loop
+                "decision_path": [
+                    {"node": "trend_alignment", "answer": "with_regime",
+                     "because": "long in a diagnosed bull trend"},
+                    {"node": "level_proximity", "answer": "at_level",
+                     "because": "entry sits on the lower mock level"},
+                    {"node": "stop_placement", "answer": "beyond_swing",
+                     "because": "stop is ~0.8% below entry"},
+                    {"node": "risk_reward", "answer": "pass",
+                     "because": "2R by construction"},
                 ],
             }
         )
