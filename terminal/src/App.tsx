@@ -20,6 +20,8 @@ import { useFeed } from "./hooks/useFeed";
 import { atr } from "./lib/indicators";
 import { loadRecent } from "./lib/recent";
 import { freshnessOf } from "./lib/freshness";
+import { loadZone, storeZone } from "./lib/timezone";
+import type { Zone } from "./lib/timezone";
 import { getAnalysis, getSymbols, hasStatus, subscribe } from "./api/client";
 import type { Bar, IngestStatus, Interval, SymbolInfo } from "./api/types";
 
@@ -45,6 +47,14 @@ export default function App() {
   // sessionStorage or a cookie, so a reload clears it. Deliberate - there
   // is no "remember my key".
   const [apiKey, setApiKey] = useState("");
+
+  // A display preference, not a credential, so it persists without being
+  // asked for. Nothing stored or sent anywhere changes with it.
+  const [zone, setZoneState] = useState<Zone>(loadZone);
+  const setZone = (next: Zone) => {
+    setZoneState(next);
+    storeZone(next);
+  };
 
   const chart = useRef<ChartHandle>(null);
 
@@ -268,6 +278,7 @@ export default function App() {
 
       {last && (
         <OhlcStrip
+          zone={zone}
           bar={last}
           prevClose={prev?.close ?? last.close}
           atr={atr14}
@@ -279,6 +290,7 @@ export default function App() {
       <main className="mx-auto flex max-w-[1400px] flex-col gap-4 px-4 py-4">
         {/* alerts are global context like the strip above, not a module */}
         <StatusBanner
+          zone={zone}
           problem={problem}
           market={feed.notices.market}
           backfill={feed.notices.backfill}
@@ -304,6 +316,7 @@ export default function App() {
                             ${subscribing ? "pointer-events-none opacity-40" : "opacity-100"}`}
               >
                 <Chart
+                  zone={zone}
                   ref={chart}
                   bars={bars}
                   stage1={feed.analysis?.stage1 ?? null}
@@ -336,6 +349,7 @@ export default function App() {
 
           <div className="flex min-w-0 flex-col gap-4">
             <SessionCard
+              zone={zone}
               connection={feed.connection}
               usingOwnKey={Boolean(apiKey)}
               source={source}
@@ -359,6 +373,8 @@ export default function App() {
           onClose={() => setSettingsOpen(false)}
           apiKey={apiKey}
           onApiKey={setApiKey}
+          zone={zone}
+          onZone={setZone}
         />
       )}
     </div>

@@ -1,4 +1,6 @@
 import Card, { CardRow, CardRows } from "./ui/Card";
+import { formatTime } from "../lib/timezone";
+import type { Zone } from "../lib/timezone";
 import type { ConnectionState } from "../api/types";
 
 const CONNECTION_LABEL: Record<ConnectionState, string> = {
@@ -21,15 +23,14 @@ interface Props {
   source: string;
   /** Epoch SECONDS of the newest bar, or null before any arrive. */
   lastBarTime: number | null;
+  zone: Zone;
 }
 
 export default function SessionCard({
-  connection, usingOwnKey, source, lastBarTime,
+  connection, usingOwnKey, source, lastBarTime, zone,
 }: Props) {
   const updated =
-    lastBarTime === null
-      ? "—"
-      : new Date(lastBarTime * 1000).toISOString().slice(11, 19) + " UTC";
+    lastBarTime === null ? "—" : formatTime(lastBarTime * 1000, zone);
 
   return (
     <Card title="Session">

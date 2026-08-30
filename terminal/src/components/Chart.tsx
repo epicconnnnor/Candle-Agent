@@ -14,9 +14,12 @@ import {
   type ISeriesApi,
   type IPriceLine,
   type AutoscaleInfo,
+  type UTCTimestamp,
 } from "lightweight-charts";
 import type { Bar, Stage1, Stage2 } from "../types";
 import { C, toCandle } from "../lib/chartTheme";
+import { formatAxisTime, formatCrosshair } from "../lib/timezone";
+import type { Zone } from "../lib/timezone";
 
 /** Imperative handle so a live stream can push bars without a re-render. */
 export interface ChartHandle {
@@ -26,6 +29,8 @@ export interface ChartHandle {
 
 interface Props {
   bars: Bar[];
+  /** Display zone for axis and crosshair labels only - the data stays UTC. */
+  zone: Zone;
   stage1: Stage1 | null;
   stage2: Stage2 | null;
   /** Bumped whenever the series is replaced wholesale (new symbol,
@@ -44,10 +49,15 @@ interface Props {
 }
 
 const Chart = forwardRef<ChartHandle, Props>(function Chart(
-  { bars, stage1, stage2, revision, scaleToLevels = true },
+  { bars, stage1, stage2, revision, zone, scaleToLevels = true },
   ref
 ) {
   const host = useRef<HTMLDivElement>(null);
+  // The chart is built once and its formatters are captured with it, so the
+  // zone reaches them through a ref rather than by rebuilding the chart -
+  // recreating it on a settings change would drop the user's pan and zoom.
+  const zoneRef = useRef<Zone>(zone);
+  zoneRef.current = zone;
   const chart = useRef<IChartApi | null>(null);
   const series = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const lines = useRef<IPriceLine[]>([]);
@@ -74,7 +84,20 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
         horzLine: { color: C.muted, width: 1, style: LineStyle.Dotted, labelBackgroundColor: C.grid },
       },
       rightPriceScale: { borderVisible: false },
-      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
+      timeScale: {
+        borderVisible: false,
+        timeVisible: true,
+        secondsVisible: false,
+        // Labels only. The series keeps its real UTC timestamps - shifting
+        // them to fake a timezone would make the axis agree with itself and
+        // disagree with the database, which is the worse failure.
+        tickMarkFormatter: (time: UTCTimestamp) =>
+          formatAxisTime((time as number) * 1000, zoneRef.current),
+      },
+      localization: {
+        timeFormatter: (time: UTCTimestamp) =>
+          formatCrosshair((time as number) * 1000, zoneRef.current),
+      },
       autoSize: true,
     });
 
@@ -180,6 +203,19 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
     // price lines don't invalidate the price scale on their own
     chart.current?.priceScale("right").applyOptions({ autoScale: true });
   }, [stage1, stage2, scaleToLevels]);
+
+  // The formatters read zoneRef, so a zone change needs an invalidation to
+  // make the axis redraw - re-applying the same option is what does it.
+  useEffect(() => {
+    // via chart.applyOptions, not timeScale().applyOptions: the formatter
+    // lives on the extended TimeScaleOptions, not on HorzScaleOptions
+    chart.current?.applyOptions({
+      timeScale: {
+        tickMarkFormatter: (time: UTCTimestamp) =>
+          formatAxisTime((time as number) * 1000, zoneRef.current),
+      },
+    });
+  }, [zone]);
 
   useImperativeHandle(ref, () => ({
     update: (bar) => {

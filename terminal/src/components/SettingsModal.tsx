@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ChevronDown, X } from "lucide-react";
 import ApiKeyField from "./ApiKeyField";
+import { ZONES, ZONE_LABELS } from "../lib/timezone";
+import type { Zone } from "../lib/timezone";
 
 const TABS = ["Model", "General", "Notifications"] as const;
 type Tab = (typeof TABS)[number];
@@ -30,6 +32,33 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 
 function Field({ children }: { children: ReactNode }) {
   return <div className={`${CONTROL_W} shrink-0`}>{children}</div>;
+}
+
+/** The controlled sibling of SelectField, for a setting that actually applies. */
+function ZoneField({ value, onChange }: { value: Zone; onChange: (z: Zone) => void }) {
+  return (
+    <Field>
+      <div className="relative">
+        <select
+          value={value}
+          aria-label="Display timezone"
+          onChange={(e) => onChange(e.target.value as Zone)}
+          className={`${FIELD} w-full appearance-none pr-8`}
+        >
+          {ZONES.map((z) => (
+            <option key={z} value={z} className="bg-ctl text-text">
+              {ZONE_LABELS[z]}
+            </option>
+          ))}
+        </select>
+        <ChevronDown
+          size={14}
+          aria-hidden="true"
+          className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-label"
+        />
+      </div>
+    </Field>
+  );
 }
 
 function TextField(props: { value: string; align?: "left" | "right" }) {
@@ -80,12 +109,17 @@ function CheckField({ checked }: { checked?: boolean }) {
 
 interface Props {
   onClose: () => void;
+  /** Display zone for every rendered timestamp. Affects nothing stored. */
+  zone: Zone;
+  onZone: (zone: Zone) => void;
   /** Held in the parent's React state only - never persisted anywhere. */
   apiKey: string;
   onApiKey: (key: string) => void;
 }
 
-export default function SettingsModal({ onClose, apiKey, onApiKey }: Props) {
+export default function SettingsModal({
+  onClose, apiKey, onApiKey, zone, onZone,
+}: Props) {
   const [tab, setTab] = useState<Tab>("Model");
   const panel = useRef<HTMLDivElement>(null);
 
@@ -184,6 +218,13 @@ export default function SettingsModal({ onClose, apiKey, onApiKey }: Props) {
 
           {tab === "General" && (
             <>
+              <Row label="Timezone">
+                <ZoneField value={zone} onChange={onZone} />
+              </Row>
+              <p className="-mt-1 max-w-[320px] font-sans text-[12px] leading-snug text-label">
+                Changes how times are displayed. Bars, analyses and scores are
+                stored in UTC either way, and the model always reads UTC.
+              </p>
               <Row label="Analyze every Nth bar">
                 <TextField value="1" align="right" />
               </Row>
