@@ -156,12 +156,12 @@ def prompt_fingerprint() -> str:
     h = hashlib.sha256()
     for path in contract_prompts():
         h.update(path.name.encode())
-        h.update(path.read_bytes())
+        h.update(_content(path))
     # the strategy documents, by name and content: editing one changes what
     # the model was taught as surely as editing a prompt does
     for path in contract_docs():
         h.update(path.name.encode())
-        h.update(path.read_bytes())
+        h.update(_content(path))
     # and the map deciding which of them a regime is shown - the same docs
     # wired differently is a different contract
     h.update(json.dumps({"stage1": list(STAGE1_DOCS),
@@ -170,6 +170,23 @@ def prompt_fingerprint() -> str:
     for name, value in validator_gates():
         h.update(f"{name}={value}".encode())
     return h.hexdigest()[:16]
+
+
+def _content(path: pathlib.Path) -> bytes:
+    """File bytes with line endings normalised to LF.
+
+    Hashing raw bytes made the contract identity depend on the checkout
+    rather than on the contract. Git rewrites LF to CRLF on Windows, so
+    one commit hashed to 130c36877d5928f8 inside the Linux container and
+    9ad6d422c1fd7354 on the Windows host that wrote it - and the pooling
+    guard would then have refused to pool analyses whose prompts were
+    character-for-character the same.
+
+    A .gitattributes can keep a working tree consistent, but it cannot
+    make the hash right for someone who has configured their own; the
+    normalisation has to happen where the hash is taken.
+    """
+    return path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
 
 def contract_docs() -> list[pathlib.Path]:
