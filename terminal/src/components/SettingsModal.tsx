@@ -80,12 +80,21 @@ function CheckField({ checked }: { checked?: boolean }) {
 
 interface Props {
   onClose: () => void;
-  /** Held in the parent's React state only - never persisted anywhere. */
+  /**
+   * Held in the parent's React state, and additionally in this browser's
+   * localStorage only when `remember` is on. Never sent to the server for
+   * storage either way.
+   */
   apiKey: string;
   onApiKey: (key: string) => void;
+  remember: boolean;
+  onRemember: (remember: boolean) => void;
+  onForget: () => void;
 }
 
-export default function SettingsModal({ onClose, apiKey, onApiKey }: Props) {
+export default function SettingsModal({
+  onClose, apiKey, onApiKey, remember, onRemember, onForget,
+}: Props) {
   const [tab, setTab] = useState<Tab>("Model");
   const panel = useRef<HTMLDivElement>(null);
 
@@ -174,6 +183,9 @@ export default function SettingsModal({ onClose, apiKey, onApiKey }: Props) {
                 <ApiKeyField
                   apiKey={apiKey}
                   onChange={onApiKey}
+                  remember={remember}
+                  onRemember={onRemember}
+                  onForget={onForget}
                   labelClass={FIELD_LABEL}
                   fieldClass={FIELD}
                   controlWidth={CONTROL_W}
