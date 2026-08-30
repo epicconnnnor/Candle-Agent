@@ -113,5 +113,17 @@ MAX_DELIVER = int(os.environ.get("MAX_DELIVER", "3"))  # redeliveries before giv
 
 RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE", "100"))  # $ risked per trade
 
+# --- demo mode ---
+# A visitor with no key of their own may spend the SERVER's key, up to a
+# daily ceiling. Measured cost is ~5,068 tokens per analysis under the
+# current prompt contract (4,519 prompt + 549 completion over 29 runs), so
+# the default 200 is about 1.01M tokens a day.
+#
+# The global cap is the one that protects the bill. The per-IP cap is not
+# a second line of defence - an IP is trivially changed - it exists so one
+# visitor cannot drain the day before anyone else arrives.
+DEMO_DAILY_ANALYSES = int(os.environ.get("DEMO_DAILY_ANALYSES", "200"))
+DEMO_PER_IP_ANALYSES = int(os.environ.get("DEMO_PER_IP_ANALYSES", "3"))
+
 # metrics: each service exposes Prometheus metrics on its own port
 METRICS_PORT = int(os.environ.get("METRICS_PORT", "0"))  # 0 = disabled

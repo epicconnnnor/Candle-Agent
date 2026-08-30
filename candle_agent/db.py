@@ -122,6 +122,16 @@ CREATE TABLE IF NOT EXISTS score_runs (
     -- agree on one is refused rather than stored
     prompt_fingerprint TEXT
 );
+CREATE TABLE IF NOT EXISTS demo_usage (
+    -- UTC date, YYYY-MM-DD. The day key IS the reset: at UTC midnight a new
+    -- key starts at zero, so nothing has to run on a schedule to clear it.
+    day TEXT NOT NULL,
+    -- 'global' for the day's total, otherwise the visitor's IP. One table
+    -- rather than two because they are the same fact at two scopes.
+    scope TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, scope)
+);
 CREATE TABLE IF NOT EXISTS analysis_scores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     score_run_id INTEGER NOT NULL,
@@ -711,6 +721,60 @@ def insert_scores(score_run_id: int, rows: list[dict]) -> int:
         c.executemany(f"INSERT INTO analysis_scores ({cols}) VALUES ({marks})",
                       payload)
     return len(payload)
+
+
+# --- demo budget ---
+#
+# Counted here rather than in memory for two reasons. A restart must not
+# hand out a fresh day's budget, and security.RateLimiter says of itself
+# that it "exists to blunt abuse, not to meter billing" - this meters
+# billing, so it belongs in the same durable place as everything else.
+
+GLOBAL = "global"
+
+
+def utc_day(now: float | None = None) -> str:
+    """The budget's day key. UTC so the reset instant is the same everywhere."""
+    return time.strftime("%Y-%m-%d", time.gmtime(now if now is not None else time.time()))
+
+
+def demo_used(day: str, scope: str = GLOBAL) -> int:
+    with conn() as c:
+        r = c.execute("SELECT used FROM demo_usage WHERE day=? AND scope=?",
+                      (day, scope)).fetchone()
+    return r["used"] if r else 0
+
+
+def record_demo_use(day: str, ip: str) -> None:
+    """Charge one analysis to the day and to the visitor, together.
+
+    Called only AFTER an analysis has succeeded: a provider outage or a
+    validation failure costs the visitor nothing, because it produced
+    nothing. Both scopes move in one transaction so they cannot disagree.
+    """
+    with conn() as c:
+        c.executemany(
+            "INSERT INTO demo_usage (day, scope, used) VALUES (?,?,1) "
+            "ON CONFLICT(day, scope) DO UPDATE SET used = used + 1",
+            [(day, GLOBAL), (day, ip)],
+        )
+
+
+def demo_budget(day: str, ip: str, daily_cap: int, ip_cap: int) -> dict:
+    """What is left, for the caller to enforce and for the UI to show."""
+    used_today, used_by_ip = demo_used(day, GLOBAL), demo_used(day, ip)
+    return {
+        "day": day,
+        "daily_cap": daily_cap,
+        "daily_used": used_today,
+        "daily_remaining": max(0, daily_cap - used_today),
+        "ip_cap": ip_cap,
+        "ip_used": used_by_ip,
+        "ip_remaining": max(0, ip_cap - used_by_ip),
+        # what the visitor can actually run right now: whichever ceiling
+        # they reach first
+        "remaining": max(0, min(daily_cap - used_today, ip_cap - used_by_ip)),
+    }
 
 
 def get_scores(score_run_id: int):

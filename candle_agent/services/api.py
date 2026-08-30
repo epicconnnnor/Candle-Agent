@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from prometheus_client import make_asgi_app
 from pydantic import BaseModel, Field
 
@@ -28,6 +28,12 @@ from ..metrics import SSE_CLIENTS
 from . import scorer
 
 STATIC = pathlib.Path(__file__).parent.parent / "static"
+
+# Real analyses, frozen to files and shipped with the app, so a visitor can
+# see the whole pipeline before deciding whether to spend anything. They are
+# always available and cost nothing - the live demo budget cannot exhaust
+# them. See scripts/export_demo_samples.py.
+DEMO_SAMPLES = pathlib.Path(__file__).parent.parent / "demo_samples"
 _clients: set[asyncio.Queue] = set()
 _state = {}
 
@@ -263,23 +269,35 @@ async def trigger(request: Request, symbol: str,
     bus: JetStream persists messages to disk, so putting a key on a
     request subject would write it down - exactly what must never happen.
 
-    Without a key the old path is unchanged: publish a request, the
-    analyzer picks it up, the result arrives over SSE (202).
+    Without a key it is a DEMO run on the server's key, and it also runs
+    inline - for a different reason. The budget may only be charged for an
+    analysis that actually happened, and a request handed to the bus is one
+    this process never learns the outcome of. Queuing it would mean
+    charging on submission and billing visitors for provider outages.
+
+    The automatic bar-driven path is untouched: the analyzer still consumes
+    analysis.request off the bus. This endpoint is the manual trigger.
     """
     _enforce_limit(request)
     _check_key_transport(request, x_llm_key)
     symbol = symbol.upper()
 
+    demo_ip = demo_day = None
     if not x_llm_key:
-        if config.LLM_PROVIDER == "mock" or config.LLM_API_KEY:
-            await bus.publish(_state["js"], bus.ANALYSIS_REQUEST.format(symbol=symbol),
-                              {"symbol": symbol, "ts": 0})
-            return JSONResponse({"status": "queued", "symbol": symbol}, status_code=202)
-        raise HTTPException(
-            400,
-            "An LLM API key is required. This server has none configured, so "
-            "supply your own in Settings - it is used for this request only "
-            "and never stored.")
+        if config.LLM_PROVIDER != "mock" and not config.LLM_API_KEY:
+            raise HTTPException(
+                400,
+                "An LLM API key is required. This server has none configured, "
+                "so supply your own in Settings - it is used for this request "
+                "only and never stored.")
+        # A mock provider spends nothing, so it is never metered.
+        if _demo_metered():
+            demo_ip = security.client_ip(request, config.TRUST_PROXY_HEADERS)
+            demo_day = db.utc_day()
+            budget = db.demo_budget(demo_day, demo_ip, config.DEMO_DAILY_ANALYSES,
+                                    config.DEMO_PER_IP_ANALYSES)
+            if budget["remaining"] <= 0:
+                raise HTTPException(429, _demo_exhausted_message(budget))
 
     try:
         llm = get_llm(api_key=x_llm_key)
@@ -306,10 +324,18 @@ async def trigger(request: Request, symbol: str,
         # not enough bars, or validation failed after retries
         raise HTTPException(422, security.scrub(e, x_llm_key)) from None
 
+    # Charged here and nowhere else: every failure path above raised, so
+    # reaching this line is what "the analysis happened" means.
+    if demo_day and demo_ip:
+        db.record_demo_use(demo_day, demo_ip)
+
     # the RESULT carries no key, so it is safe to fan out like any other
     await bus.publish(_state["js"], bus.ANALYSIS_COMPLETED.format(symbol=symbol),
                       {"symbol": symbol, "bar_ts": 0, **result})
-    return {"status": "completed", "symbol": symbol, "key_source": "user", **result}
+    return {"status": "completed", "symbol": symbol,
+            "key_source": "user" if x_llm_key else "demo",
+            "demo": _demo_status(request) if demo_day else None,
+            **result}
 
 
 class ChatTurn(BaseModel):
@@ -390,6 +416,77 @@ async def followup(request: Request, symbol: str, req: ChatRequest,
         "prompt_tokens": sum(u.get("prompt_tokens") or 0 for u in usage) or None,
         "completion_tokens": sum(u.get("completion_tokens") or 0 for u in usage) or None,
     }
+
+
+def _demo_metered() -> bool:
+    """Whether a keyless analysis spends real money and must be counted."""
+    return config.LLM_PROVIDER != "mock" and bool(config.LLM_API_KEY)
+
+
+def _demo_exhausted_message(budget: dict) -> str:
+    if budget["daily_remaining"] <= 0:
+        return ("Daily demo budget used - add your own key in Settings. The "
+                "stored samples are still available, and the budget resets at "
+                "00:00 UTC.")
+    return (f"You have used this device's {budget['ip_cap']} demo analyses for "
+            "today - add your own key in Settings. The stored samples are "
+            "still available, and the budget resets at 00:00 UTC.")
+
+
+def _demo_status(request: Request) -> dict:
+    """What the UI shows so an exhausted budget is never a surprise."""
+    if not _demo_metered():
+        # nothing is being spent, so there is nothing to ration
+        return {"metered": False, "remaining": None, "daily_cap": None,
+                "ip_cap": None, "resets_at": "00:00 UTC"}
+    ip = security.client_ip(request, config.TRUST_PROXY_HEADERS)
+    budget = db.demo_budget(db.utc_day(), ip, config.DEMO_DAILY_ANALYSES,
+                            config.DEMO_PER_IP_ANALYSES)
+    return {"metered": True, "resets_at": "00:00 UTC", **budget}
+
+
+def _load_samples() -> list[dict]:
+    out = []
+    for path in sorted(DEMO_SAMPLES.glob("*.json")):
+        try:
+            out.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError) as e:
+            # a corrupt sample must not take the endpoint down with it
+            print(f"[api] demo sample {path.name} unreadable: {e}")
+    return out
+
+
+@app.get("/api/demo/samples")
+def demo_samples():
+    """Stored examples, newest bar first. Never live, and labelled so."""
+    samples = _load_samples()
+    return {
+        "samples": [
+            {
+                "id": s["id"], "symbol": s["symbol"], "interval": s["interval"],
+                "bar_ts": s["bar_ts"], "model": s["model"],
+                "decision": s["stage2"]["decision"],
+                "regime": s["stage1"]["regime"], "cycle": s["stage1"]["cycle"],
+                "bars": len(s["bars"]),
+            }
+            for s in samples
+        ],
+    }
+
+
+@app.get("/api/demo/samples/{sample_id}")
+def demo_sample(sample_id: str):
+    """One stored example in full: bars, diagnosis, decision, checklist."""
+    for s in _load_samples():
+        if s["id"] == sample_id:
+            return s
+    raise HTTPException(404, f"no stored sample {sample_id!r}")
+
+
+@app.get("/api/demo/status")
+def demo_status(request: Request):
+    """Remaining free analyses, for the button to show before it is pressed."""
+    return _demo_status(request)
 
 
 class ReplayRequest(BaseModel):
