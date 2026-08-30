@@ -13,6 +13,9 @@ import type {
   ChatReply,
   ChatTurn,
   ConnectionState,
+  DemoSample,
+  DemoSampleSummary,
+  DemoStatus,
   IngestStatus,
   InlineAnalysis,
   KeyTestResult,
@@ -165,6 +168,17 @@ export const askFollowUp = (
     headers: keyHeader(apiKey),
     body: JSON.stringify({ message, history: history.slice(-12) }),
   });
+
+/** How many free analyses are left before a key is needed. */
+export const getDemoStatus = () => request<DemoStatus>("/api/demo/status");
+
+/** The stored examples this build ships with. */
+export const getDemoSamples = () =>
+  request<{ samples: DemoSampleSummary[] }>("/api/demo/samples");
+
+/** One stored example in full: bars, diagnosis, decision, checklist. */
+export const getDemoSample = (id: string) =>
+  request<DemoSample>(`/api/demo/samples/${encodeURIComponent(id)}`);
 
 /** Minimal upstream call to tell a good key from a bad one. */
 export const testKey = (apiKey: string) =>

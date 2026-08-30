@@ -313,3 +313,70 @@ export interface ChatReply {
   prompt_tokens: number | null;
   completion_tokens: number | null;
 }
+
+// --- demo mode ----------------------------------------------------------
+
+/**
+ * GET /api/demo/status - how many free analyses are left.
+ *
+ * `metered` is false when the server runs a mock provider: nothing is
+ * being spent, so there is nothing to ration and the UI shows no counter.
+ */
+export interface DemoStatus {
+  metered: boolean;
+  resets_at: string;
+  remaining?: number;
+  daily_cap?: number;
+  daily_used?: number;
+  daily_remaining?: number;
+  ip_cap?: number;
+  ip_used?: number;
+  ip_remaining?: number;
+  day?: string;
+}
+
+/** A row from GET /api/demo/samples. Here `bars` is a COUNT. */
+export interface DemoSampleSummary {
+  id: string;
+  symbol: string;
+  interval: string;
+  /** Epoch MS of the bar the analysis was made on - the sample's date. */
+  bar_ts: number;
+  model: string;
+  decision: Decision;
+  regime: Regime;
+  cycle: Cycle;
+  bars: number;
+}
+
+/** One OHLCV row inside a stored sample. No symbol: the sample carries it. */
+export interface SampleBar {
+  ts: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+/**
+ * A stored example in full, from GET /api/demo/samples/{id}.
+ *
+ * Real output this system produced, frozen to a file. Never live, and the
+ * UI must not present it as such. Deliberately NOT extending the summary:
+ * there `bars` is a count, here it is the series itself.
+ */
+export interface DemoSample {
+  id: string;
+  symbol: string;
+  interval: string;
+  bar_ts: number;
+  model: string;
+  price_at: number | null;
+  atr_at: number | null;
+  latency_ms: number;
+  prompt_fingerprint: string | null;
+  bars: SampleBar[];
+  stage1: Stage1;
+  stage2: Stage2;
+}

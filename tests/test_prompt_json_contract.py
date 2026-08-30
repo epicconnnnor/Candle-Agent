@@ -311,3 +311,104 @@ def test_the_fingerprint_is_stable_across_calls():
     from candle_agent.orchestrator import prompt_fingerprint
 
     assert len({prompt_fingerprint() for _ in range(5)}) == 1
+
+
+# --- assembled prompts --------------------------------------------------
+
+def test_assembly_is_deterministic():
+    """The same bar must rebuild the same prompt, or replay is not replay."""
+    from candle_agent import orchestrator
+
+    for stage, regime in (("stage1", None), ("stage2", "range")):
+        built = {orchestrator.assemble(stage, regime)[0] for _ in range(5)}
+        assert len(built) == 1
+
+
+def test_stage_one_never_sees_the_trade_gates():
+    """Stage 1 describes. Handing it §6-§9 would let it decide first."""
+    from candle_agent import orchestrator
+
+    text, ids = orchestrator.assemble("stage1")
+    assert "§6 Trend alignment" not in text
+    assert "§9 Risk-reward" not in text
+    assert "§1 Is there enough data?" in text
+    assert ids == ["01-trend-recognition.md", "02-range-recognition.md",
+                   "03-cycle.md", "06-decision-tree.md#stage1"]
+
+
+def test_stage_two_gets_exactly_one_playbook():
+    """Both would let it choose its strategy after seeing the diagnosis."""
+    from candle_agent import orchestrator
+
+    trend = (orchestrator.DOCS / "04-trend-strategy.md").read_text(
+        encoding="utf-8").splitlines()[0]
+    rng = (orchestrator.DOCS / "05-range-strategy.md").read_text(
+        encoding="utf-8").splitlines()[0]
+
+    for regime, want_trend in (("bull_trend", True), ("bear_trend", True),
+                               ("range", False), ("chop", False)):
+        text, ids = orchestrator.assemble("stage2", regime)
+        assert (trend in text) is want_trend, regime
+        assert (rng in text) is (not want_trend), regime
+        assert len(ids) == 2
+        assert ids[0] == f"{orchestrator.DECISION_TREE}#stage2"
+
+
+def test_stage_two_never_sees_the_stage_one_gates():
+    from candle_agent import orchestrator
+
+    text, _ = orchestrator.assemble("stage2", "range")
+    assert "§1 Is there enough data?" not in text
+    assert "§9 Risk-reward" in text
+
+
+def test_every_route_has_a_playbook():
+    """A regime the map cannot answer would raise mid-analysis."""
+    from candle_agent import orchestrator
+
+    assert set(orchestrator.ROUTES) == set(orchestrator.STRATEGY_DOCS)
+    for name in set(orchestrator.STRATEGY_DOCS.values()) | set(orchestrator.STAGE1_DOCS):
+        assert (orchestrator.DOCS / name).exists(), name
+
+
+def test_editing_any_strategy_doc_moves_the_fingerprint():
+    """Enumerated from disk, not from contract_docs(), for the same reason
+    the validator constants are: the code under test does not get to say
+    which files it is responsible for."""
+    from candle_agent import orchestrator
+
+    base = orchestrator.prompt_fingerprint()
+    docs = sorted(orchestrator.DOCS.glob("*.md"))
+    assert len(docs) == 6, [d.name for d in docs]
+    for path in docs:
+        original = path.read_bytes()
+        try:
+            path.write_bytes(original + b"\n<!-- edited by a test -->\n")
+            assert orchestrator.prompt_fingerprint() != base, path.name
+        finally:
+            path.write_bytes(original)
+    assert orchestrator.prompt_fingerprint() == base
+
+
+def test_rewiring_the_route_map_moves_the_fingerprint(monkeypatch):
+    """The same docs wired differently is a different contract."""
+    from candle_agent import orchestrator
+
+    base = orchestrator.prompt_fingerprint()
+    monkeypatch.setitem(orchestrator.STRATEGY_DOCS, "range", "04-trend-strategy.md")
+    assert orchestrator.prompt_fingerprint() != base
+
+
+def test_a_renamed_stage_heading_raises_rather_than_mis_splitting():
+    """Silently handing stage 1 the trade gates is the failure to avoid."""
+    from candle_agent import orchestrator
+
+    path = orchestrator.DOCS / orchestrator.DECISION_TREE
+    original = path.read_bytes()
+    try:
+        path.write_bytes(original.replace(b"## Stage 2 - decide", b"## nope")
+                                 .replace("## Stage 2 — decide".encode(), b"## nope"))
+        with pytest.raises(RuntimeError, match="stage headings"):
+            orchestrator.assemble("stage2", "range")
+    finally:
+        path.write_bytes(original)

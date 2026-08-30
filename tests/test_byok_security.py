@@ -72,10 +72,14 @@ def clean(monkeypatch):
     # a fresh database file per test: SQLite in WAL mode keeps handles alive
     # long enough that deleting a shared file races on Windows, and isolated
     # files are better test hygiene anyway
-    monkeypatch.setenv(
-        "DB_PATH",
-        os.path.join(tempfile.gettempdir(), f"byok_{next(_counter)}.db"),
-    )
+    path = os.path.join(tempfile.gettempdir(), f"byok_{next(_counter)}.db")
+    # The counter restarts every session, so these names are reused across
+    # runs and the file is only fresh if it is actually removed. A test that
+    # asserts a counter is zero would otherwise read yesterday's total.
+    for suffix in ("", "-wal", "-shm"):
+        if os.path.exists(path + suffix):
+            os.remove(path + suffix)
+    monkeypatch.setenv("DB_PATH", path)
     db.insert_bars(SYMBOL, "1d", ramp(60))
 
     # the bus double records what would have been published
@@ -85,7 +89,16 @@ def clean(monkeypatch):
         async def publish(self, subject, payload):
             published.append((subject, json.loads(payload.decode())))
 
+    class FakeNC:
+        """Progress events go core-NATS, not JetStream."""
+
+        async def publish(self, subject, payload):
+            published.append((subject, json.loads(payload.decode())))
+
+    # both, and set here rather than inherited: this file used to pass only
+    # because another test module happened to populate _state["nc"] first
     api._state["js"] = FakeJS()
+    api._state["nc"] = FakeNC()
     monkeypatch.setattr(config, "RATE_LIMIT_PER_HOUR", 0)   # off unless tested
     monkeypatch.setattr(api, "_limiter", security.RateLimiter(0))
     yield published
@@ -191,15 +204,26 @@ def test_missing_key_everywhere_is_a_400_not_a_500(client, monkeypatch):
     assert "key is required" in res.json()["detail"].lower()
 
 
-def test_server_key_path_still_queues(client, monkeypatch, clean):
+def test_server_key_path_runs_inline_and_never_publishes_the_key(
+        client, monkeypatch, clean, upstream):
+    """A keyless run is a DEMO run, and it runs here so it can be counted.
+
+    It used to be queued on the bus. The budget may only be charged for an
+    analysis that actually happened, and a request handed to the bus is one
+    this process never learns the outcome of - so it runs inline, exactly
+    as the visitor-key path does, and for the same reason the result rather
+    than the request is what reaches JetStream.
+    """
     published = clean
     monkeypatch.setattr(config, "LLM_API_KEY", SERVER_KEY)
     monkeypatch.setattr(config, "LLM_PROVIDER", "openai_compat")
 
     res = client.post(f"/api/analyze/{SYMBOL}")
-    assert res.status_code == 202
-    assert res.json()["status"] == "queued"
-    assert any(s.startswith("analysis.request.") for s, _ in published)
+    assert res.status_code == 200, res.text
+    assert res.json()["key_source"] == "demo"
+    # the request never went on the bus; only the finished result did
+    assert not any(s.startswith("analysis.request.") for s, _ in published)
+    assert any(s.startswith("analysis.completed.") for s, _ in published)
     assert SERVER_KEY not in json.dumps(published)
 
 
@@ -217,7 +241,7 @@ def test_key_over_plain_http_is_refused(upstream, monkeypatch):
 def test_plain_http_is_fine_without_a_key(monkeypatch, clean):
     monkeypatch.setattr(config, "LLM_PROVIDER", "mock")
     insecure = TestClient(app=api.app, base_url="http://not-localhost.example")
-    assert insecure.post(f"/api/analyze/{SYMBOL}").status_code == 202
+    assert insecure.post(f"/api/analyze/{SYMBOL}").status_code == 200
 
 
 def test_loopback_may_send_a_key_over_http(upstream):
@@ -281,3 +305,112 @@ def test_key_test_endpoint_reports_invalid_without_leaking(client, monkeypatch):
     assert res.status_code == 200
     assert res.json()["valid"] is False
     assert USER_KEY not in res.text
+
+
+# --- demo budget --------------------------------------------------------
+#
+# The budget lives in the database, not in RateLimiter, because that class
+# says of itself that it "exists to blunt abuse, not to meter billing".
+# This meters billing: a restart must not hand out a fresh day.
+
+@pytest.fixture
+def demo(monkeypatch):
+    """A server key and a real provider - the case that costs money."""
+    monkeypatch.setattr(config, "LLM_API_KEY", SERVER_KEY)
+    monkeypatch.setattr(config, "LLM_PROVIDER", "openai_compat")
+    monkeypatch.setattr(config, "DEMO_DAILY_ANALYSES", 5)
+    monkeypatch.setattr(config, "DEMO_PER_IP_ANALYSES", 2)
+
+
+def test_a_demo_run_is_charged_once_and_only_on_success(client, upstream, demo):
+    day = db.utc_day()
+    assert db.demo_used(day) == 0
+
+    res = client.post(f"/api/analyze/{SYMBOL}")
+
+    assert res.status_code == 200, res.text
+    assert db.demo_used(day) == 1
+    assert res.json()["demo"]["remaining"] == 1      # per-IP cap of 2
+
+
+def test_a_failed_demo_run_costs_the_visitor_nothing(client, monkeypatch, demo):
+    """A provider outage is not the visitor's fault and is not their budget."""
+    def explode(url, headers=None, json=None, timeout=None):
+        return FakeResponse({"error": "upstream on fire"}, status_code=500)
+
+    monkeypatch.setattr(llm_mod.httpx, "post", explode)
+    day = db.utc_day()
+
+    res = client.post(f"/api/analyze/{SYMBOL}")
+
+    assert res.status_code == 502
+    assert db.demo_used(day) == 0
+
+
+def test_the_per_ip_cap_stops_one_visitor_draining_the_day(client, upstream, demo):
+    for _ in range(2):
+        assert client.post(f"/api/analyze/{SYMBOL}").status_code == 200
+
+    res = client.post(f"/api/analyze/{SYMBOL}")
+
+    assert res.status_code == 429
+    assert "add your own key" in res.json()["detail"]
+    # the day still has budget for somebody else
+    assert db.demo_used(db.utc_day()) == 2
+
+
+def test_the_global_cap_is_not_per_ip(client, upstream, demo):
+    """Rotating IPs must not buy more of the day's budget."""
+    day = db.utc_day()
+    for i in range(5):
+        db.record_demo_use(day, f"10.0.0.{i}")       # five different visitors
+
+    res = client.post(f"/api/analyze/{SYMBOL}")
+
+    assert res.status_code == 429
+    assert "Daily demo budget used" in res.json()["detail"]
+
+
+def test_a_visitor_key_is_not_charged_to_the_demo_budget(client, upstream, demo):
+    day = db.utc_day()
+    for i in range(5):
+        db.record_demo_use(day, f"10.0.0.{i}")       # budget fully spent
+
+    res = client.post(f"/api/analyze/{SYMBOL}", headers={"X-LLM-Key": USER_KEY})
+
+    assert res.status_code == 200, res.text
+    assert res.json()["key_source"] == "user"
+    assert db.demo_used(day) == 5                    # unchanged
+
+
+def test_the_budget_survives_a_restart(client, upstream, demo):
+    client.post(f"/api/analyze/{SYMBOL}")
+
+    # a restart is a fresh process reading the same database
+    assert db.demo_used(db.utc_day()) == 1
+
+
+def test_the_budget_is_keyed_by_utc_day(client, upstream, demo):
+    client.post(f"/api/analyze/{SYMBOL}")
+
+    assert db.demo_used(db.utc_day()) == 1
+    assert db.demo_used("2099-01-01") == 0           # tomorrow starts at zero
+
+
+def test_demo_status_reports_what_is_left(client, upstream, demo):
+    before = client.get("/api/demo/status").json()
+    assert before["metered"] is True
+    assert before["remaining"] == 2
+
+    client.post(f"/api/analyze/{SYMBOL}")
+
+    assert client.get("/api/demo/status").json()["remaining"] == 1
+
+
+def test_a_mock_provider_is_never_metered(client, monkeypatch):
+    monkeypatch.setattr(config, "LLM_PROVIDER", "mock")
+    monkeypatch.setattr(config, "LLM_API_KEY", "")
+
+    assert client.get("/api/demo/status").json()["metered"] is False
+    assert client.post(f"/api/analyze/{SYMBOL}").status_code == 200
+    assert db.demo_used(db.utc_day()) == 0

@@ -12,6 +12,7 @@ import os
 
 import httpx
 
+from . import config
 from .security import scrub
 
 
@@ -107,7 +108,12 @@ class OpenAICompatLLM:
         """
         self.base_url = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
         self.model = os.environ.get("LLM_MODEL", "deepseek-chat")
-        self.api_key = api_key or os.environ.get("LLM_API_KEY", "")
+        # config for the same reason get_llm reads it: the api decides a
+        # request is a demo run because config.LLM_API_KEY is set, so the
+        # client must spend that key and not a second reading of it.
+        # base_url and model stay on os.environ - no endpoint branches on
+        # them, and config has no equivalent defaults for them.
+        self.api_key = api_key or config.LLM_API_KEY
         if not self.api_key:
             raise LLMKeyRequired(
                 "No LLM API key available. Supply one in Settings, or configure "
@@ -228,6 +234,9 @@ def get_llm(api_key: str | None = None):
     """
     if api_key:
         return OpenAICompatLLM(api_key=api_key)
-    if os.environ.get("LLM_PROVIDER", "mock").lower() == "mock":
+    # config, not os.environ: the api decides whether a keyless request is a
+    # demo run by reading config.LLM_PROVIDER, and a second reading of the
+    # same setting is a second answer waiting to disagree with the first.
+    if config.LLM_PROVIDER == "mock":
         return MockLLM()
     return OpenAICompatLLM()
