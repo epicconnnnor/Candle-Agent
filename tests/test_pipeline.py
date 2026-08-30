@@ -434,3 +434,87 @@ def test_delete_bars_refuses_an_empty_symbol():
     import pytest as _pytest
     with _pytest.raises(ValueError):
         db.delete_bars("")
+
+
+def test_delete_bars_range_keeps_the_rest_of_the_series():
+    db.insert_bars("SEGGY", "1m", ramp(10))
+    stored = sorted(b["ts"] for b in db.recent_bars("SEGGY", limit=10, interval="1m"))
+
+    removed = db.delete_bars_range("SEGGY", "1m", stored[3], stored[5])
+
+    assert removed == 3
+    left = sorted(b["ts"] for b in db.recent_bars("SEGGY", limit=10, interval="1m"))
+    assert left == stored[:3] + stored[6:]      # window gone, both sides kept
+
+
+def test_delete_bars_range_refuses_a_backwards_window():
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        db.delete_bars_range("SEGGY", "1m", 200, 100)
+
+
+# --- bar provenance ----------------------------------------------------
+
+def test_demo_bars_are_hidden_from_default_reads():
+    db.insert_bars("PROVA", "1m", ramp(5), source="alpaca")
+    db.insert_bars("PROVA", "1m", ramp(5, start_ts=1_700_000_000_000 + 5 * 60_000), source=db.SYNTHETIC)
+
+    real = db.recent_bars("PROVA", limit=50, interval="1m")
+    both = db.recent_bars("PROVA", limit=50, interval="1m", include_synthetic=True)
+
+    assert len(real) == 5
+    assert len(both) == 10
+
+
+def test_legacy_rows_without_a_source_still_read_as_real():
+    # NULL means "written before the column existed", not "synthetic" -
+    # otherwise this migration would blank every existing database.
+    db.insert_bars("PROVB", "1m", ramp(4))
+
+    assert len(db.recent_bars("PROVB", limit=50, interval="1m")) == 4
+
+
+def test_demo_mode_can_read_its_own_bars(monkeypatch):
+    # The demo path writes a series it must be able to read back; the
+    # filter is about keeping synthetic data out of *real* runs.
+    db.insert_bars("PROVC", "1m", ramp(6), source=db.SYNTHETIC)
+    assert db.recent_bars("PROVC", limit=50, interval="1m") == []
+
+    monkeypatch.setenv("INGEST_MODE", "demo")
+    assert len(db.recent_bars("PROVC", limit=50, interval="1m")) == 6
+
+
+def test_a_demo_bar_cannot_choose_the_active_interval():
+    db.insert_bars("PROVD", "5m", ramp(3), source="alpaca")
+    db.insert_bars("PROVD", "1m", ramp(3, start_ts=1_700_000_000_000 + 60 * 60_000), source=db.SYNTHETIC)
+
+    # the newest bar overall is synthetic, so the naive answer is "1m"
+    assert db.active_interval("PROVD") == "5m"
+
+
+def test_delete_bars_can_evict_by_provenance():
+    db.insert_bars("PROVE", "1m", ramp(5), source="alpaca")
+    db.insert_bars("PROVE", "1m", ramp(5, start_ts=1_700_000_000_000 + 5 * 60_000), source=db.SYNTHETIC)
+
+    removed = db.delete_bars("PROVE", "1m", source=db.SYNTHETIC)
+
+    assert removed == 5
+    assert len(db.recent_bars("PROVE", limit=50, interval="1m",
+                              include_synthetic=True)) == 5
+
+
+def test_ingest_stamps_the_feed_that_produced_each_bar(monkeypatch):
+    """Provenance comes from the source object, so it cannot be forgotten."""
+    install_bus(monkeypatch)
+    sources.reset({"fake": FakeSource(stream_bars=ramp(4), symbol="PROVF")})
+
+    async def go():
+        await ingest.switch("fake", "PROVF", "1m")
+        await settle()
+
+    asyncio.run(go())
+
+    stored = db.recent_bars("PROVF", limit=100, interval="1m",
+                            include_synthetic=True)
+    assert stored, "the fake feed wrote nothing"
+    assert {b["source"] for b in stored} == {"fake"}

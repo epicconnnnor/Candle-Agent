@@ -73,7 +73,7 @@ def current_status() -> dict:
 
 # --- feed --------------------------------------------------------------
 
-async def _store_and_publish(symbol, interval, bar):
+async def _store_and_publish(symbol, interval, bar, source):
     global _last_bar_at, _stall_reported
     _last_bar_at = time.monotonic()
     if _stall_reported:                 # the feed came back
@@ -81,8 +81,10 @@ async def _store_and_publish(symbol, interval, bar):
         _emit_status({"symbol": symbol, "interval": interval,
                       "state": "streaming",
                       "message": "bars are arriving again"})
+    # `source` is the feed's own name, so demo mode stamps 'demo' without
+    # anyone having to remember to: _resolve() hands back the demo source.
     db.insert_bar(symbol, interval, bar["ts"], bar["open"], bar["high"],
-                  bar["low"], bar["close"], bar["volume"])
+                  bar["low"], bar["close"], bar["volume"], source)
     # NOTE: the bus payload is unchanged from before intervals existed.
     # Downstream (analyzer, paper trader) is deliberately untouched.
     await bus.publish(_js, bus.BARS_CLOSED.format(symbol=symbol),
@@ -114,7 +116,7 @@ async def _backfill(source, symbol: str, interval: str) -> int:
         return 0
 
     if bars:
-        db.insert_bars(symbol, interval, bars)      # stored, not republished
+        db.insert_bars(symbol, interval, bars, source=source.name)   # stored, not republished
         print(f"[ingest] backfilled {len(bars)} {interval} bars for {symbol}")
 
     # A short backfill is normal - free data plans cap how far intraday
@@ -200,7 +202,7 @@ async def _feed(source, symbol: str, interval: str):
     """Stream until cancelled."""
     try:
         async for bar in source.stream(symbol, interval):
-            await _store_and_publish(symbol, interval, bar)
+            await _store_and_publish(symbol, interval, bar, source.name)
 
         # a stream that returns instead of raising is still the feed going
         # quiet - say so rather than leaving a chart that stops updating
