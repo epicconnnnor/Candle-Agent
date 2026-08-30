@@ -54,6 +54,9 @@ _FATAL_CODES = {
 
 CLOCK_TTL_S = 30.0              # the clock changes twice a day; poll rarely
 
+PAGE_LIMIT = 10_000             # Alpaca's per-request maximum
+MAX_PAGES = 50                  # a hard stop; 500k bars is far past any use
+
 # A US equity session is 6.5h, and roughly 252 of 365 days are trading
 # days. Used to size the history lookback: ask for too narrow a window and
 # Alpaca returns only today.
@@ -118,6 +121,32 @@ class AlpacaSource(DataSource):
     def asset_class(self, symbol: str) -> str:
         """Alpaca writes crypto pairs with a slash; equities have none."""
         return self._classes.get(symbol) or (CRYPTO if "/" in symbol else EQUITY)
+
+    async def _get_pages(self, url: str, params: dict, what: str, symbol: str,
+                         limit: int):
+        """Follow next_page_token until `limit` bars are collected.
+
+        A single request caps out well below a useful replay window, so
+        anything larger has to page. Pages come newest-first (sort=desc),
+        so collecting until we have `limit` gives the most recent ones.
+        """
+        out: list[dict] = []
+        token = None
+        for _ in range(MAX_PAGES):
+            page_params = dict(params, limit=min(limit - len(out), PAGE_LIMIT))
+            if token:
+                page_params["page_token"] = token
+            payload = await self._get(url, page_params, what)
+
+            raw = payload.get("bars") or []
+            if isinstance(raw, dict):           # crypto keys bars by symbol
+                raw = raw.get(symbol, [])
+            out.extend(raw)
+
+            token = payload.get("next_page_token")
+            if not token or len(out) >= limit:
+                break
+        return out[:limit]
 
     async def _get(self, url: str, params: dict, what: str):
         try:
@@ -211,11 +240,7 @@ class AlpacaSource(DataSource):
             url = f"{config.ALPACA_DATA_URL}/v2/stocks/{symbol}/bars"
             params["feed"] = config.ALPACA_FEED
 
-        payload = await self._get(url, params, "historical bars")
-
-        raw = payload.get("bars") or []
-        if isinstance(raw, dict):               # crypto keys bars by symbol
-            raw = raw.get(symbol, [])
+        raw = await self._get_pages(url, params, "historical bars", symbol, limit)
         bars = [
             {
                 "ts": _to_ms(b["t"]),

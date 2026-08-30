@@ -1,7 +1,8 @@
-"""SQLite storage for bars and analyses."""
+"""SQLite storage for bars, analyses, paper trades and replay runs."""
 import json
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 
 DEFAULT_DB_PATH = "candle_agent.db"
@@ -43,7 +44,13 @@ CREATE TABLE IF NOT EXISTS analyses (
     -- the market this verdict was formed against; nullable because rows
     -- written before these existed genuinely do not know
     price_at REAL,
-    atr_at REAL
+    atr_at REAL,
+    -- null for live analyses; set for rows produced by a replay run
+    replay_run_id INTEGER,
+    -- measured from the provider's usage block, so cost estimates come
+    -- from history rather than a character heuristic
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER
 );
 CREATE TABLE IF NOT EXISTS paper_trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,7 +59,88 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     entry REAL, stop REAL, target REAL,
     created_ts INTEGER, filled_ts INTEGER, closed_ts INTEGER,
     exit_price REAL, exit_reason TEXT, r_multiple REAL,
-    bars_pending INTEGER DEFAULT 0
+    bars_pending INTEGER DEFAULT 0,
+    -- separated at write time so scoring never has to reconstruct which
+    -- trades came from which replay
+    replay_run_id INTEGER
+);
+CREATE TABLE IF NOT EXISTS replay_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    interval TEXT NOT NULL,
+    start_ts INTEGER NOT NULL,
+    end_ts INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    bars_total INTEGER NOT NULL DEFAULT 0,
+    bars_done INTEGER NOT NULL DEFAULT 0,
+    model TEXT,
+    created_at INTEGER NOT NULL,
+    -- cost control: a run cannot start without an explicit cap
+    max_analyses INTEGER NOT NULL,
+    analyses_done INTEGER NOT NULL DEFAULT 0,
+    estimated_tokens INTEGER,
+    stop_requested INTEGER NOT NULL DEFAULT 0,
+    -- publish every Nth bar; 1 = every bar. Recorded per run because it
+    -- decides how much the scored forward windows overlap, and therefore
+    -- how many independent observations the run is actually worth.
+    stride INTEGER NOT NULL DEFAULT 1,
+    detail TEXT
+);
+CREATE TABLE IF NOT EXISTS score_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    replay_run_id INTEGER,              -- null: live analyses can be scored too
+    -- JSON array when a score run spans several replay runs. replay_run_id
+    -- above stays populated for the single-run case so existing queries
+    -- keep working; it is null when this names more than one.
+    replay_run_ids TEXT,
+    symbol TEXT NOT NULL,
+    interval TEXT NOT NULL,
+    -- every threshold in the scoring layer is a judgement call, so the
+    -- parameters travel with the scores. Without them a stored score
+    -- cannot be interpreted, only misread.
+    scorer_version TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    analyses_scored INTEGER NOT NULL DEFAULT 0,
+    analyses_incomplete INTEGER NOT NULL DEFAULT 0,
+    independent_windows INTEGER NOT NULL DEFAULT 0,
+    summary_json TEXT,
+    status TEXT NOT NULL,
+    detail TEXT
+);
+CREATE TABLE IF NOT EXISTS analysis_scores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    score_run_id INTEGER NOT NULL,
+    analysis_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL, interval TEXT NOT NULL, bar_ts INTEGER NOT NULL,
+
+    -- denormalised on purpose: a score row must stay reproducible on its
+    -- own, and must not silently change if the analyses row is amended
+    price_at REAL, atr_at REAL, anchor_source TEXT,
+    bars_available INTEGER, window_end_ts INTEGER,
+    complete INTEGER NOT NULL DEFAULT 0,
+
+    -- continuous measures, stored so every threshold can be re-swept
+    -- later without re-running anything. Never store only the label.
+    fwd_mfe_atr REAL, fwd_mae_atr REAL, fwd_return_atr REAL,
+    fwd_efficiency REAL, fwd_envelope_atr REAL, horizons_json TEXT,
+
+    claimed_regime TEXT, claimed_strength TEXT,
+    decision TEXT, confidence TEXT,
+    entry REAL, stop REAL, target REAL,
+    distance_to_nearest_level_atr REAL,
+
+    trade_outcome TEXT, filled_ts INTEGER, bars_to_fill INTEGER,
+    exit_ts INTEGER, bars_to_exit INTEGER,
+    r_multiple REAL, mtm_r REAL, trade_mae_r REAL, trade_mfe_r REAL,
+    entry_distance_atr REAL, same_bar_ambiguous INTEGER DEFAULT 0,
+
+    abstention_outcome TEXT, missed_direction TEXT,
+    miss_aligned INTEGER, bars_to_payoff INTEGER,
+
+    realized_regime TEXT, regime_verdict TEXT,
+
+    UNIQUE (score_run_id, analysis_id)
 );
 """
 
@@ -94,6 +182,27 @@ def _migrate(c):
         if analysis_cols and column not in analysis_cols:
             c.execute(f"ALTER TABLE analyses ADD COLUMN {column} REAL")
             print(f"[db] migrated analyses: added {column}")
+    for column in ("replay_run_id", "prompt_tokens", "completion_tokens"):
+        if analysis_cols and column not in analysis_cols:
+            c.execute(f"ALTER TABLE analyses ADD COLUMN {column} INTEGER")
+            print(f"[db] migrated analyses: added {column}")
+
+    # DEFAULT 1 is honest here, unlike price_at above: every run that
+    # predates this column really did publish every bar.
+    score_cols = _columns(c, "score_runs")
+    if score_cols and "replay_run_ids" not in score_cols:
+        c.execute("ALTER TABLE score_runs ADD COLUMN replay_run_ids TEXT")
+        print("[db] migrated score_runs: added replay_run_ids")
+
+    run_cols = _columns(c, "replay_runs")
+    if run_cols and "stride" not in run_cols:
+        c.execute("ALTER TABLE replay_runs ADD COLUMN stride INTEGER NOT NULL DEFAULT 1")
+        print("[db] migrated replay_runs: added stride")
+
+    trade_cols = _columns(c, "paper_trades")
+    if trade_cols and "replay_run_id" not in trade_cols:
+        c.execute("ALTER TABLE paper_trades ADD COLUMN replay_run_id INTEGER")
+        print("[db] migrated paper_trades: added replay_run_id")
 
 
 @contextmanager
@@ -164,34 +273,66 @@ def active_interval(symbol):
     return r["interval"] if r else None
 
 
-def recent_bars(symbol, limit=100, interval=None):
-    """Newest `limit` bars, oldest first.
+def recent_bars(symbol, limit=100, interval=None, as_of_ts=None):
+    """Newest `limit` bars at or before `as_of_ts`, oldest first.
 
     `interval=None` means the most recently ingested interval for this
     symbol, so a series is never a mix of granularities.
+
+    `as_of_ts` is the no-lookahead bound. It matters for replay, where the
+    whole history is already stored, but it is not replay-specific: on the
+    live path an analysis of bar N could previously read bars newer than N
+    whenever the analyzer lagged ingest or a message was redelivered.
     """
     interval = interval or active_interval(symbol)
     if interval is None:
         return []
+
+    where = "symbol=? AND interval=?"
+    params = [symbol, interval]
+    if as_of_ts:
+        where += " AND ts <= ?"
+        params.append(as_of_ts)
+    params.append(limit)
+
     with conn() as c:
         rows = c.execute(
-            "SELECT * FROM bars WHERE symbol=? AND interval=? ORDER BY ts DESC LIMIT ?",
-            (symbol, interval, limit),
+            f"SELECT * FROM bars WHERE {where} ORDER BY ts DESC LIMIT ?", params
         ).fetchall()
     return [dict(r) for r in reversed(rows)]
 
 
+def count_bars_before(symbol, interval, ts) -> int:
+    """How much history precedes a bar - the analyzer needs MIN_BARS of it."""
+    with conn() as c:
+        return c.execute(
+            "SELECT COUNT(*) FROM bars WHERE symbol=? AND interval=? AND ts < ?",
+            (symbol, interval, ts)).fetchone()[0]
+
+
+def bars_in_range(symbol, interval, start_ts, end_ts):
+    """Every stored bar in a window, oldest first. The replay source."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT * FROM bars WHERE symbol=? AND interval=? AND ts BETWEEN ? AND ? "
+            "ORDER BY ts ASC", (symbol, interval, start_ts, end_ts)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def insert_analysis(symbol, ts, stage1, stage2, model, latency_ms, interval="1m",
-                    price_at=None, atr_at=None):
+                    price_at=None, atr_at=None,
+                    prompt_tokens=None, completion_tokens=None):
     """`price_at` / `atr_at` capture the market at the moment of analysis, so
     staleness can be judged later without guessing."""
     with conn() as c:
-        c.execute(
+        cur = c.execute(
             "INSERT INTO analyses (symbol, ts, stage1, stage2, model, latency_ms, "
-            "interval, price_at, atr_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            "interval, price_at, atr_at, prompt_tokens, completion_tokens) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (symbol, ts, json.dumps(stage1), json.dumps(stage2), model, latency_ms,
-             interval, price_at, atr_at),
+             interval, price_at, atr_at, prompt_tokens, completion_tokens),
         )
+        return cur.lastrowid
 
 
 def latest_analysis(symbol, interval=None):
@@ -210,11 +351,234 @@ def latest_analysis(symbol, interval=None):
     return d
 
 
+# --- replay runs ---
+
+_RUN_COLS = ("symbol", "interval", "start_ts", "end_ts", "status", "bars_total",
+             "bars_done", "model", "created_at", "max_analyses", "analyses_done",
+             "estimated_tokens", "stop_requested", "stride", "detail")
+
+
+def create_replay_run(**fields) -> int:
+    row = {k: fields.get(k) for k in _RUN_COLS}
+    row["created_at"] = row["created_at"] or int(time.time() * 1000)
+    row["status"] = row["status"] or "pending"
+    for k in ("bars_done", "analyses_done", "stop_requested"):
+        row[k] = row[k] or 0
+    row["stride"] = row["stride"] or 1
+    cols = ", ".join(_RUN_COLS)
+    marks = ", ".join("?" * len(_RUN_COLS))
+    with conn() as c:
+        cur = c.execute(f"INSERT INTO replay_runs ({cols}) VALUES ({marks})",
+                        [row[k] for k in _RUN_COLS])
+        return cur.lastrowid
+
+
+def get_replay_run(run_id: int):
+    with conn() as c:
+        r = c.execute("SELECT * FROM replay_runs WHERE id=?", (run_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def update_replay_run(run_id: int, **fields) -> None:
+    allowed = {k: v for k, v in fields.items() if k in _RUN_COLS}
+    if not allowed:
+        return
+    sets = ", ".join(f"{k}=?" for k in allowed)
+    with conn() as c:
+        c.execute(f"UPDATE replay_runs SET {sets} WHERE id=?",
+                  [*allowed.values(), run_id])
+
+
+def request_replay_stop(run_id: int) -> bool:
+    with conn() as c:
+        return c.execute(
+            "UPDATE replay_runs SET stop_requested=1 WHERE id=? AND status IN "
+            "('pending','running')", (run_id,)).rowcount > 0
+
+
+def stamp_replay_rows(run_id: int, symbol: str,
+                      analysis_id_floor: int, trade_id_floor: int) -> tuple[int, int]:
+    """Attribute rows written since the run started to that run.
+
+    Done here rather than by the analyzer: the analyzer must not be able to
+    tell replay from live, so it cannot write the id itself. Safe because
+    replay refuses to run while live ingest is streaming the same symbol,
+    and the id floors exclude anything that predates the run.
+    """
+    with conn() as c:
+        a = c.execute(
+            "UPDATE analyses SET replay_run_id=? WHERE symbol=? AND id>? "
+            "AND replay_run_id IS NULL", (run_id, symbol, analysis_id_floor)).rowcount
+        t = c.execute(
+            "UPDATE paper_trades SET replay_run_id=? WHERE symbol=? AND id>? "
+            "AND replay_run_id IS NULL", (run_id, symbol, trade_id_floor)).rowcount
+    return a, t
+
+
+def max_id(table: str) -> int:
+    if table not in ("analyses", "paper_trades"):
+        raise ValueError(f"unsupported table {table!r}")
+    with conn() as c:
+        return c.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()[0]
+
+
+def token_stats(model: str | None = None) -> dict:
+    """Measured tokens per analysis, for costing a run before it starts."""
+    where, params = "prompt_tokens IS NOT NULL", []
+    if model:
+        where += " AND model=?"
+        params.append(model)
+    with conn() as c:
+        r = c.execute(
+            f"SELECT COUNT(*), AVG(prompt_tokens), AVG(completion_tokens) "
+            f"FROM analyses WHERE {where}", params).fetchone()
+    return {"samples": r[0], "avg_prompt": r[1], "avg_completion": r[2]}
+
+
+# --- scoring ---
+
+_SCORE_RUN_COLS = ("replay_run_id", "replay_run_ids", "symbol", "interval",
+                   "scorer_version",
+                   "params_json", "created_at", "analyses_scored",
+                   "analyses_incomplete", "independent_windows", "summary_json",
+                   "status", "detail")
+
+_SCORE_COLS = (
+    "score_run_id", "analysis_id", "symbol", "interval", "bar_ts",
+    "price_at", "atr_at", "anchor_source", "bars_available", "window_end_ts",
+    "complete", "fwd_mfe_atr", "fwd_mae_atr", "fwd_return_atr",
+    "fwd_efficiency", "fwd_envelope_atr", "horizons_json",
+    "claimed_regime", "claimed_strength", "decision", "confidence",
+    "entry", "stop", "target", "distance_to_nearest_level_atr",
+    "trade_outcome", "filled_ts", "bars_to_fill", "exit_ts", "bars_to_exit",
+    "r_multiple", "mtm_r", "trade_mae_r", "trade_mfe_r", "entry_distance_atr",
+    "same_bar_ambiguous", "abstention_outcome", "missed_direction",
+    "miss_aligned", "bars_to_payoff", "realized_regime", "regime_verdict",
+)
+
+
+def bars_after(symbol, interval, ts, limit):
+    """Bars STRICTLY after ts, oldest first.
+
+    The scorer's only view of the future, and the mirror of recent_bars'
+    as-of bound: that one may not look forward, this one may not look
+    back. `>` not `>=` - the decision bar itself is history.
+    """
+    with conn() as c:
+        rows = c.execute(
+            "SELECT * FROM bars WHERE symbol=? AND interval=? AND ts > ? "
+            "ORDER BY ts ASC LIMIT ?", (symbol, interval, ts, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def analyses_for_scoring(symbol, interval=None, replay_run_ids=None,
+                         start_ts=None, end_ts=None):
+    """Stored analyses, oldest first, with their JSON parsed.
+
+    `replay_run_ids` may be a single id or several. Several is how a
+    sample is accumulated across runs: one replay of a single session is
+    rarely enough rows, and runs over different days produce windows that
+    cannot overlap.
+    """
+    where, params = ["symbol=?"], [symbol]
+    if interval:
+        where.append("interval=?")
+        params.append(interval)
+    if replay_run_ids is not None:
+        ids = [replay_run_ids] if isinstance(replay_run_ids, int) else list(replay_run_ids)
+        where.append("replay_run_id IN (%s)" % ",".join("?" * len(ids)))
+        params.extend(ids)
+    if start_ts is not None:
+        where.append("ts >= ?")
+        params.append(start_ts)
+    if end_ts is not None:
+        where.append("ts <= ?")
+        params.append(end_ts)
+    with conn() as c:
+        rows = c.execute(
+            f"SELECT * FROM analyses WHERE {' AND '.join(where)} ORDER BY ts ASC",
+            params).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["stage1"] = json.loads(d["stage1"])
+        d["stage2"] = json.loads(d["stage2"])
+        out.append(d)
+    return out
+
+
+def create_score_run(**fields) -> int:
+    row = {k: fields.get(k) for k in _SCORE_RUN_COLS}
+    row["created_at"] = row["created_at"] or int(time.time() * 1000)
+    row["status"] = row["status"] or "running"
+    for k in ("analyses_scored", "analyses_incomplete", "independent_windows"):
+        row[k] = row[k] or 0
+    cols = ", ".join(_SCORE_RUN_COLS)
+    marks = ", ".join("?" * len(_SCORE_RUN_COLS))
+    with conn() as c:
+        cur = c.execute(f"INSERT INTO score_runs ({cols}) VALUES ({marks})",
+                        [row[k] for k in _SCORE_RUN_COLS])
+        return cur.lastrowid
+
+
+def update_score_run(run_id: int, **fields) -> None:
+    allowed = {k: v for k, v in fields.items() if k in _SCORE_RUN_COLS}
+    if not allowed:
+        return
+    sets = ", ".join(f"{k}=?" for k in allowed)
+    with conn() as c:
+        c.execute(f"UPDATE score_runs SET {sets} WHERE id=?",
+                  [*allowed.values(), run_id])
+
+
+def get_score_run(run_id: int):
+    with conn() as c:
+        r = c.execute("SELECT * FROM score_runs WHERE id=?", (run_id,)).fetchone()
+    if not r:
+        return None
+    d = dict(r)
+    d["params"] = json.loads(d["params_json"]) if d["params_json"] else {}
+    d["summary"] = json.loads(d["summary_json"]) if d["summary_json"] else None
+    d["replay_run_ids"] = json.loads(d["replay_run_ids"]) if d["replay_run_ids"] else (
+        [d["replay_run_id"]] if d["replay_run_id"] is not None else [])
+    return d
+
+
+def insert_scores(score_run_id: int, rows: list[dict]) -> int:
+    """Bulk insert. Re-scoring makes a NEW run rather than overwriting an
+    old one: the parameters differ, so the old scores are not stale, they
+    are answers to a different question."""
+    cols = ", ".join(_SCORE_COLS)
+    marks = ", ".join("?" * len(_SCORE_COLS))
+    payload = []
+    for row in rows:
+        r = {**row, "score_run_id": score_run_id}
+        r["horizons_json"] = json.dumps(r.get("horizons_json") or {})
+        payload.append([r.get(k) for k in _SCORE_COLS])
+    with conn() as c:
+        c.executemany(f"INSERT INTO analysis_scores ({cols}) VALUES ({marks})",
+                      payload)
+    return len(payload)
+
+
+def get_scores(score_run_id: int):
+    with conn() as c:
+        rows = c.execute(
+            "SELECT * FROM analysis_scores WHERE score_run_id=? ORDER BY bar_ts ASC",
+            (score_run_id,)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["horizons_json"] = json.loads(d["horizons_json"]) if d["horizons_json"] else {}
+        out.append(d)
+    return out
+
+
 # --- paper trading ---
 
 _TRADE_COLS = ("symbol", "direction", "order_type", "status", "entry", "stop",
                "target", "created_ts", "filled_ts", "closed_ts", "exit_price",
-               "exit_reason", "r_multiple", "bars_pending")
+               "exit_reason", "r_multiple", "bars_pending", "replay_run_id")
 
 
 def save_trade(trade: dict) -> int:

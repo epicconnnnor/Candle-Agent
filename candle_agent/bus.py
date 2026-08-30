@@ -14,7 +14,16 @@ the `analysis.completed.>` wildcard - the second token differs - so no
 existing consumer sees it by accident.
 
     ingest.control.subscribe    api    -> ingest        switch feed (request/reply)
+    ingest.control.status       any    -> ingest        what is it streaming
     ingest.status.<SYMBOL>      ingest -> api (SSE)     connection state
+
+    replay.control.start        api    -> replay        start a run (request/reply)
+    replay.control.stop         api    -> replay        stop a run
+    replay.progress.<RUN_ID>    replay -> api (SSE)     run progress
+
+Replay publishes bars on bars.closed.<SYMBOL> with the same payload
+ingest uses. Nothing in the message marks it as replay - that is what
+keeps the analyzer unable to tell the two apart.
 
 The ingest.* subjects are core NATS, deliberately outside the JetStream
 stream: a control request is only meaningful to a live ingest process,
@@ -37,6 +46,10 @@ SUBJECTS = ["bars.>", "analysis.>", "paper.>"]
 
 BARS_CLOSED = "bars.closed.{symbol}"
 INGEST_CONTROL = "ingest.control.subscribe"
+INGEST_CONTROL_STATUS = "ingest.control.status"
+REPLAY_CONTROL_START = "replay.control.start"
+REPLAY_CONTROL_STOP = "replay.control.stop"
+REPLAY_PROGRESS = "replay.progress.{run_id}"
 INGEST_STATUS = "ingest.status.{symbol}"
 ANALYSIS_REQUEST = "analysis.request.{symbol}"
 ANALYSIS_COMPLETED = "analysis.completed.{symbol}"

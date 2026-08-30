@@ -93,6 +93,7 @@ CORS_ORIGINS = [
 # --- llm ---
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "mock").lower()
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_MODEL = os.environ.get("LLM_MODEL", "")   # names the model to cost a run against
 
 # --- bring-your-own-key + abuse control ---
 # Visitors may send their own LLM key in an X-LLM-Key header. It is used

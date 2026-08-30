@@ -18,11 +18,12 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from prometheus_client import make_asgi_app
 from pydantic import BaseModel, Field
 
-from .. import bus, config, db, intervals, security, sources, symbols
+from .. import bus, config, db, intervals, scoring, security, sources, symbols
 from ..llm import (LLMAuthFailed, LLMKeyRequired, LLMUpstreamError, get_llm)
 from ..orchestrator import analyze
 from ..paper import summarize
 from ..metrics import SSE_CLIENTS
+from . import scorer
 
 STATIC = pathlib.Path(__file__).parent.parent / "static"
 _clients: set[asyncio.Queue] = set()
@@ -51,6 +52,8 @@ async def lifespan(app):
         # pipeline progress, so stage 1 and stage 2 move independently
         await nc.subscribe("snapshot.built.>", cb=_fanout),
         await nc.subscribe("analysis.stage1.completed.>", cb=_fanout),
+        # replay progress, so the UI can show a run later
+        await nc.subscribe("replay.progress.>", cb=_fanout),
     ]
     print(f"[api] bus connected {config.NATS_URL}")
     print(f"[api] sources: {', '.join(sources.names())}")
@@ -305,6 +308,114 @@ async def trigger(request: Request, symbol: str,
     await bus.publish(_state["js"], bus.ANALYSIS_COMPLETED.format(symbol=symbol),
                       {"symbol": symbol, "bar_ts": 0, **result})
     return {"status": "completed", "symbol": symbol, "key_source": "user", **result}
+
+
+class ReplayRequest(BaseModel):
+    symbol: str = Field(min_length=1)
+    interval: str = config.INTERVAL
+    start: int = 0
+    end: int = 2 ** 62
+
+    max_analyses: int | None = None
+    # every Nth bar; 1 = every bar, which is the pre-stride behaviour
+    stride: int = Field(default=1, ge=1)
+    dry_run: bool = False
+
+
+@app.post("/api/replay")
+async def start_replay(request: Request, req: ReplayRequest):
+    """Start a replay run, or price one first with dry_run=true.
+
+    max_analyses has no default on purpose: every bar costs an LLM call,
+    so a run cannot begin without the caller naming a ceiling.
+
+    stride analyses every Nth bar. It defaults to 1, so existing callers
+    are unaffected; raising it buys forward windows that do not overlap,
+    which is what makes a run's results worth more than its row count.
+    """
+    _enforce_limit(request)
+    if req.max_analyses is None:
+        raise HTTPException(
+            400,
+            "max_analyses is required: a replay costs one LLM call per bar. "
+            "Send dry_run=true first to see the estimated cost.")
+
+    try:
+        reply = await _state["nc"].request(
+            bus.REPLAY_CONTROL_START, req.model_dump_json().encode(), timeout=30)
+    except (asyncio.TimeoutError, TimeoutError):
+        raise HTTPException(503, "replay service did not respond") from None
+
+    result = json.loads(reply.data)
+    if result.get("status") != "ok":
+        raise HTTPException(400, result.get("message", "replay refused the request"))
+    return result
+
+
+@app.get("/api/replay/{run_id}")
+def replay_progress(run_id: int):
+    run = db.get_replay_run(run_id)
+    if not run:
+        raise HTTPException(404, f"no replay run {run_id}")
+    return run
+
+
+@app.post("/api/replay/{run_id}/stop")
+async def stop_replay(run_id: int):
+    try:
+        reply = await _state["nc"].request(
+            bus.REPLAY_CONTROL_STOP,
+            json.dumps({"run_id": run_id}).encode(), timeout=10)
+    except (asyncio.TimeoutError, TimeoutError):
+        raise HTTPException(503, "replay service did not respond") from None
+
+    result = json.loads(reply.data)
+    if result.get("status") != "ok":
+        raise HTTPException(404, result.get("message", "could not stop that run"))
+    return result
+
+
+class ScoreRequest(BaseModel):
+    """Scoring is free - no LLM call - so unlike a replay it needs no cap."""
+
+    symbol: str = Field(min_length=1)
+    interval: str = config.INTERVAL
+    # one replay run, or several pooled into a single sample
+    replay_run_id: int | list[int] | None = None
+    start: int | None = None
+    end: int | None = None
+    # merged over scoring.DEFAULTS; an unknown key is an error, never
+    # silently dropped, or the scores would disagree with the parameters
+    # recorded next to them
+    params: dict = Field(default_factory=dict)
+
+
+@app.post("/api/score")
+async def start_score(request: Request, req: ScoreRequest):
+    """Score stored analyses against what happened next.
+
+    On demand only, and never coupled to replay finishing: every
+    threshold in the scoring layer is a judgement call, so re-running
+    with different parameters is the normal case rather than the
+    exception. Each run is a new row - old scores are not stale, they are
+    answers to a different question.
+    """
+    _enforce_limit(request)
+    try:
+        run = await asyncio.to_thread(
+            scorer.run, req.symbol, req.interval, req.replay_run_id,
+            req.params, req.start, req.end)
+    except scoring.ScoringError as e:
+        raise HTTPException(400, str(e)) from None
+    return run
+
+
+@app.get("/api/score/{score_run_id}")
+def score_detail(score_run_id: int):
+    run = db.get_score_run(score_run_id)
+    if not run:
+        raise HTTPException(404, f"no score run {score_run_id}")
+    return {**run, "scores": db.get_scores(score_run_id)}
 
 
 @app.get("/api/paper/{symbol}")
