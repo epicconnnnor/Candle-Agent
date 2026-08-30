@@ -89,6 +89,10 @@ CREATE TABLE IF NOT EXISTS replay_runs (
 CREATE TABLE IF NOT EXISTS score_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     replay_run_id INTEGER,              -- null: live analyses can be scored too
+    -- JSON array when a score run spans several replay runs. replay_run_id
+    -- above stays populated for the single-run case so existing queries
+    -- keep working; it is null when this names more than one.
+    replay_run_ids TEXT,
     symbol TEXT NOT NULL,
     interval TEXT NOT NULL,
     -- every threshold in the scoring layer is a judgement call, so the
@@ -185,6 +189,11 @@ def _migrate(c):
 
     # DEFAULT 1 is honest here, unlike price_at above: every run that
     # predates this column really did publish every bar.
+    score_cols = _columns(c, "score_runs")
+    if score_cols and "replay_run_ids" not in score_cols:
+        c.execute("ALTER TABLE score_runs ADD COLUMN replay_run_ids TEXT")
+        print("[db] migrated score_runs: added replay_run_ids")
+
     run_cols = _columns(c, "replay_runs")
     if run_cols and "stride" not in run_cols:
         c.execute("ALTER TABLE replay_runs ADD COLUMN stride INTEGER NOT NULL DEFAULT 1")
@@ -428,7 +437,8 @@ def token_stats(model: str | None = None) -> dict:
 
 # --- scoring ---
 
-_SCORE_RUN_COLS = ("replay_run_id", "symbol", "interval", "scorer_version",
+_SCORE_RUN_COLS = ("replay_run_id", "replay_run_ids", "symbol", "interval",
+                   "scorer_version",
                    "params_json", "created_at", "analyses_scored",
                    "analyses_incomplete", "independent_windows", "summary_json",
                    "status", "detail")
@@ -461,16 +471,23 @@ def bars_after(symbol, interval, ts, limit):
     return [dict(r) for r in rows]
 
 
-def analyses_for_scoring(symbol, interval=None, replay_run_id=None,
+def analyses_for_scoring(symbol, interval=None, replay_run_ids=None,
                          start_ts=None, end_ts=None):
-    """Stored analyses, oldest first, with their JSON parsed."""
+    """Stored analyses, oldest first, with their JSON parsed.
+
+    `replay_run_ids` may be a single id or several. Several is how a
+    sample is accumulated across runs: one replay of a single session is
+    rarely enough rows, and runs over different days produce windows that
+    cannot overlap.
+    """
     where, params = ["symbol=?"], [symbol]
     if interval:
         where.append("interval=?")
         params.append(interval)
-    if replay_run_id is not None:
-        where.append("replay_run_id=?")
-        params.append(replay_run_id)
+    if replay_run_ids is not None:
+        ids = [replay_run_ids] if isinstance(replay_run_ids, int) else list(replay_run_ids)
+        where.append("replay_run_id IN (%s)" % ",".join("?" * len(ids)))
+        params.extend(ids)
     if start_ts is not None:
         where.append("ts >= ?")
         params.append(start_ts)
@@ -522,6 +539,8 @@ def get_score_run(run_id: int):
     d = dict(r)
     d["params"] = json.loads(d["params_json"]) if d["params_json"] else {}
     d["summary"] = json.loads(d["summary_json"]) if d["summary_json"] else None
+    d["replay_run_ids"] = json.loads(d["replay_run_ids"]) if d["replay_run_ids"] else (
+        [d["replay_run_id"]] if d["replay_run_id"] is not None else [])
     return d
 
 

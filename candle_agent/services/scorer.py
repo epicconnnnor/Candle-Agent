@@ -19,11 +19,39 @@ from .. import db, scoring
 from ..intervals import to_ms
 
 
-def run(symbol: str, interval: str, replay_run_id: int | None = None,
+def _run_ids(replay_run_id, symbol: str, interval: str) -> list[int] | None:
+    """Normalise and check the replay runs a score run is allowed to pool."""
+    if replay_run_id is None:
+        return None
+    ids = ([replay_run_id] if isinstance(replay_run_id, int)
+           else [int(x) for x in replay_run_id])
+    if not ids:
+        return None
+    for rid in ids:
+        row = db.get_replay_run(rid)
+        if row is None:
+            raise scoring.ScoringError(f"no replay run {rid}")
+        if row["symbol"] != symbol or row["interval"] != interval:
+            raise scoring.ScoringError(
+                f"replay run {rid} is {row['symbol']} {row['interval']}, not "
+                f"{symbol} {interval}: pooling them would mix two different "
+                "questions into one sample")
+    return sorted(set(ids))
+
+
+def run(symbol: str, interval: str, replay_run_id=None,
         overrides: dict | None = None, start_ts: int | None = None,
         end_ts: int | None = None) -> dict:
-    """Score every stored analysis in scope. Returns the run row."""
+    """Score every stored analysis in scope. Returns the run row.
+
+    `replay_run_id` may name one replay run or several. Several is how a
+    sample is accumulated: a single session rarely yields enough rows to
+    clear the gates, and runs over different days produce windows that
+    cannot overlap. The runs must agree on symbol and interval - scoring
+    a 1m run beside a 15m one would pool two different questions.
+    """
     symbol = symbol.upper()
+    ids = _run_ids(replay_run_id, symbol, interval)
     params = scoring.resolve_params(overrides)
     # Far enough for whichever grader looks furthest: the regime window,
     # the abstention window, or a trade that fills late and then needs its
@@ -33,11 +61,14 @@ def run(symbol: str, interval: str, replay_run_id: int | None = None,
              + int(params["fill_window_bars"]))
 
     interval_ms = to_ms(interval)
-    analyses = db.analyses_for_scoring(symbol, interval, replay_run_id,
-                                       start_ts, end_ts)
+    analyses = db.analyses_for_scoring(symbol, interval, ids, start_ts, end_ts)
 
     run_id = db.create_score_run(
-        replay_run_id=replay_run_id, symbol=symbol, interval=interval,
+        # the scalar column stays populated only when there is exactly one,
+        # so a query for "the run this scored" cannot silently see half a sample
+        replay_run_id=ids[0] if ids and len(ids) == 1 else None,
+        replay_run_ids=json.dumps(ids) if ids else None,
+        symbol=symbol, interval=interval,
         scorer_version=scoring.SCORER_VERSION,
         # the parameters travel with the scores; without them a stored
         # score cannot be interpreted, only misread

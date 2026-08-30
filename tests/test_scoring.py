@@ -592,6 +592,77 @@ def test_mutating_bars_after_the_decision_does_change_the_score(fresh):
     assert after["fwd_mfe_atr"] > before["fwd_mfe_atr"]
 
 
+# --- pooling several replay runs into one sample ------------------------
+
+def two_runs(fresh_bars=True):
+    """Two replay runs on days far enough apart that no window can overlap."""
+    day1 = climb(80, step=0.2)
+    day2 = climb(80, step=0.2, start_ts=START_TS + 5000 * STEP_MS)
+    db.insert_bars(SYMBOL, "1m", day1 + day2)
+    ids = []
+    for day in (day1, day2):
+        rid = db.create_replay_run(symbol=SYMBOL, interval="1m",
+                                   start_ts=day[0]["ts"], end_ts=day[-1]["ts"],
+                                   status="completed", bars_total=2,
+                                   max_analyses=2, stride=30)
+        ids.append(rid)
+        for idx in (10, 40):
+            a = analysis(ts=day[idx]["ts"], price=day[idx]["close"])
+            aid = db.insert_analysis(SYMBOL, a["ts"], a["stage1"], a["stage2"],
+                                     "test", 1, "1m", price_at=a["price_at"],
+                                     atr_at=a["atr_at"])
+            db.stamp_replay_rows(rid, SYMBOL, aid - 1, 0)
+    return ids
+
+
+def test_one_score_run_can_pool_several_replay_runs(fresh):
+    ids = two_runs()
+    run = scorer.run(SYMBOL, "1m", replay_run_id=ids,
+                     overrides={"horizon_bars": 5, "abstention_horizon_bars": 5,
+                                "fill_window_bars": 3})
+    assert run["analyses_scored"] == 4, "all four analyses, both runs"
+    assert run["replay_run_ids"] == sorted(ids)
+    # the scalar column stays null so a query for "the run this scored"
+    # cannot silently see half the sample
+    assert run["replay_run_id"] is None
+
+
+def test_a_single_run_still_fills_the_scalar_column(fresh):
+    ids = two_runs()
+    run = scorer.run(SYMBOL, "1m", replay_run_id=ids[0],
+                     overrides={"horizon_bars": 5, "abstention_horizon_bars": 5,
+                                "fill_window_bars": 3})
+    assert run["replay_run_id"] == ids[0]
+    assert run["replay_run_ids"] == [ids[0]]
+    assert run["analyses_scored"] == 2
+
+
+def test_pooling_runs_of_a_different_series_is_refused(fresh):
+    ids = two_runs()
+    other = db.create_replay_run(symbol=SYMBOL, interval="15m", start_ts=1,
+                                 end_ts=2, status="completed", bars_total=1,
+                                 max_analyses=1)
+    with pytest.raises(scoring.ScoringError) as e:
+        scorer.run(SYMBOL, "1m", replay_run_id=[ids[0], other])
+    assert "15m" in str(e.value)
+
+
+def test_pooling_an_unknown_run_is_refused(fresh):
+    with pytest.raises(scoring.ScoringError) as e:
+        scorer.run(SYMBOL, "1m", replay_run_id=[9999])
+    assert "no replay run 9999" in str(e.value)
+
+
+def test_pooled_runs_on_different_days_are_independent_windows(fresh):
+    ids = two_runs()
+    run = scorer.run(SYMBOL, "1m", replay_run_id=ids,
+                     overrides={"horizon_bars": 5, "abstention_horizon_bars": 5,
+                                "fill_window_bars": 3})
+    summary = json.loads(run["summary_json"])
+    # 4 decisions, 30 bars apart within a day and 5000 apart between them
+    assert summary["independent_windows"] == 4
+
+
 # --- the run records how it was produced --------------------------------
 
 def test_a_run_stores_the_parameters_it_used(fresh):

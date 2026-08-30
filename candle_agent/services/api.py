@@ -380,7 +380,8 @@ class ScoreRequest(BaseModel):
 
     symbol: str = Field(min_length=1)
     interval: str = config.INTERVAL
-    replay_run_id: int | None = None
+    # one replay run, or several pooled into a single sample
+    replay_run_id: int | list[int] | None = None
     start: int | None = None
     end: int | None = None
     # merged over scoring.DEFAULTS; an unknown key is an error, never
