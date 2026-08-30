@@ -263,3 +263,26 @@ export interface SseEnvelope {
 }
 
 export type ConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected";
+
+/** One exchange in a follow-up conversation, as the API expects it. */
+export interface ChatTurn {
+  role: "user" | "agent";
+  text: string;
+}
+
+/**
+ * POST /api/chat/{symbol}.
+ *
+ * `reply` is prose and is deliberately unvalidated - unlike stage 1 and
+ * stage 2 there is no schema for it, so it is commentary on the stored
+ * analysis rather than a second verdict with equal standing.
+ */
+export interface ChatReply {
+  symbol: string;
+  reply: string;
+  model: string;
+  analysis_ts: number | null;
+  key_source: "user" | "server";
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+}

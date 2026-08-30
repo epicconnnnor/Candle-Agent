@@ -569,3 +569,45 @@ def test_zero_risk_is_malformed_not_infinitely_good():
             "target": 101.0, "risk_reward": 99.0, "confidence": "high",
             "reasoning_chain": ["x"]}
     assert any("no defined risk" in e for e in schemas.consistency_errors(flat))
+
+
+# --- follow-up chat context --------------------------------------------
+
+def test_chat_history_is_capped_and_roles_normalised():
+    from candle_agent import chat
+
+    history = [{"role": "user", "text": f"q{i}"} if i % 2 == 0
+               else {"role": "agent", "text": f"a{i}"} for i in range(40)]
+    trimmed = chat.trim_history(history)
+
+    assert len(trimmed) == chat.MAX_HISTORY_TURNS * 2
+    assert {m["role"] for m in trimmed} == {"user", "assistant"}
+    assert trimmed[-1]["content"] == "a39"          # newest kept
+    assert all(m["content"] != "q0" for m in trimmed)   # oldest dropped
+
+
+def test_chat_drops_empty_turns_and_truncates_long_ones():
+    from candle_agent import chat
+
+    out = chat.trim_history([{"role": "user", "text": "   "},
+                             {"role": "user", "text": "x" * 9000}])
+    assert len(out) == 1
+    assert len(out[0]["content"]) == chat.MAX_MESSAGE_CHARS
+
+
+def test_chat_pins_the_bar_table_in_a_single_system_message():
+    """Pinned once, not per turn, so a long conversation grows by prose only."""
+    from candle_agent import chat
+    from candle_agent.features import build_feature_packet
+
+    packet = build_feature_packet(ramp(40))
+    analysis = {"ts": 1, "interval": "1m", "model": "mock", "price_at": 100.0,
+                "atr_at": 0.5,
+                "stage1": {"regime": "range"}, "stage2": {"decision": "no_trade"}}
+    msgs = chat.build_messages("AAPL", analysis, packet,
+                               [{"role": "user", "text": "earlier"}], "why?")
+
+    assert [m["role"] for m in msgs] == ["system", "user", "user"]
+    assert sum(1 for m in msgs if "K1," in m["content"]) == 1
+    assert "no_trade" in msgs[0]["content"]
+    assert msgs[-1]["content"] == "why?"

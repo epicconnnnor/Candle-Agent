@@ -18,8 +18,10 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from prometheus_client import make_asgi_app
 from pydantic import BaseModel, Field
 
-from .. import bus, config, db, intervals, scoring, security, sources, symbols
+from .. import (bus, chat, config, db, intervals, scoring, security, sources,
+                symbols)
 from ..llm import (LLMAuthFailed, LLMKeyRequired, LLMUpstreamError, get_llm)
+from ..features import build_feature_packet
 from ..orchestrator import analyze
 from ..paper import summarize
 from ..metrics import SSE_CLIENTS
@@ -308,6 +310,86 @@ async def trigger(request: Request, symbol: str,
     await bus.publish(_state["js"], bus.ANALYSIS_COMPLETED.format(symbol=symbol),
                       {"symbol": symbol, "bar_ts": 0, **result})
     return {"status": "completed", "symbol": symbol, "key_source": "user", **result}
+
+
+class ChatTurn(BaseModel):
+    role: str = Field(pattern="^(user|agent|assistant)$")
+    text: str = Field(max_length=chat.MAX_MESSAGE_CHARS)
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=chat.MAX_MESSAGE_CHARS)
+    interval: str | None = None
+    # the client sends what it is showing; the server trims it anyway
+    history: list[ChatTurn] = Field(default_factory=list, max_length=40)
+
+
+@app.post("/api/chat/{symbol}")
+async def followup(request: Request, symbol: str, req: ChatRequest,
+                   x_llm_key: str | None = Header(default=None)):
+    """Answer a question about the stored analysis for this symbol.
+
+    Runs INLINE and never touches the bus, for the same reason
+    /api/analyze does not when a visitor key is present: JetStream
+    persists to disk, so a keyed request published to a subject would
+    write the key down. There is no queued fallback here either - a
+    follow-up is a request/response exchange, and a 202 with no way to
+    deliver the answer would be a worse lie than a 400.
+
+    Nothing this returns is validated and nothing it returns is stored.
+    It must not reach the analyses table: the scorer reads that table,
+    and an unvalidated answer in it would pollute the population.
+    """
+    _enforce_limit(request)
+    _check_key_transport(request, x_llm_key)
+    symbol = symbol.upper()
+
+    analysis = db.latest_analysis(symbol, req.interval)
+    if analysis is None:
+        raise HTTPException(
+            404,
+            f"No stored analysis for {symbol}. Run an analysis first - a "
+            "follow-up explains a verdict that already exists.")
+
+    bars = db.recent_bars(symbol, limit=100, interval=analysis.get("interval"))
+    if not bars:
+        raise HTTPException(
+            404, f"No stored bars for {symbol}, so there is no table to cite.")
+
+    if not x_llm_key and config.LLM_PROVIDER != "mock" and not config.LLM_API_KEY:
+        raise HTTPException(
+            400,
+            "An LLM API key is required. This server has none configured, so "
+            "supply your own in Settings - it is used for this request only "
+            "and never stored.")
+
+    try:
+        llm = get_llm(api_key=x_llm_key)
+    except LLMKeyRequired as e:
+        raise HTTPException(400, str(e)) from None
+
+    messages = chat.build_messages(
+        symbol, analysis, build_feature_packet(bars), req.history, req.message)
+
+    try:
+        # blocking HTTP inside; keep the event loop free
+        reply = await asyncio.to_thread(llm.converse, messages)
+    except LLMAuthFailed as e:
+        raise HTTPException(400, security.scrub(e, x_llm_key)) from None
+    except LLMUpstreamError as e:
+        raise HTTPException(502, security.scrub(e, x_llm_key)) from None
+
+    usage = [u for u in getattr(llm, "usage", []) if u]
+    return {
+        "symbol": symbol,
+        "reply": reply,
+        "model": llm.model,
+        "analysis_ts": analysis.get("ts"),
+        "key_source": "user" if x_llm_key else "server",
+        # measured, not estimated - the same rule the analysis path follows
+        "prompt_tokens": sum(u.get("prompt_tokens") or 0 for u in usage) or None,
+        "completion_tokens": sum(u.get("completion_tokens") or 0 for u in usage) or None,
+    }
 
 
 class ReplayRequest(BaseModel):
