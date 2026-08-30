@@ -27,6 +27,11 @@ CREATE TABLE IF NOT EXISTS bars (
     interval TEXT NOT NULL,
     ts INTEGER NOT NULL,
     open REAL, high REAL, low REAL, close REAL, volume REAL,
+    -- which feed produced this row: 'alpaca', 'binance', 'demo'. The demo
+    -- generator writes here under real symbol names, so without this a
+    -- synthetic bar is indistinguishable from a real one until somebody
+    -- notices the price is wrong.
+    source TEXT,
     PRIMARY KEY (symbol, interval, ts)
 );
 """
@@ -146,6 +151,34 @@ CREATE TABLE IF NOT EXISTS analysis_scores (
 
 _BAR_COLS = "symbol, interval, ts, open, high, low, close, volume"
 
+# The one `source` value that is not market data. Everything else names a
+# real venue, so "is this synthetic" is a single comparison rather than a
+# guess about prices or timestamps.
+SYNTHETIC = "demo"
+
+# NULL means "written before this column existed", NOT "synthetic". Such
+# rows read as real: refusing to show them would blank every database
+# predating this column, and a row's true provenance is a data question,
+# not a schema one - see scripts/backfill_bar_source.py.
+_REAL_ONLY = f"(source IS NULL OR source <> '{SYNTHETIC}')"
+
+
+def _real_only(include_synthetic):
+    """SQL fragment restricting a bars query to real market data.
+
+    `include_synthetic=None` means "decide from the environment": demo
+    mode is allowed to see its own bars, because otherwise the demo path
+    would write a series it could never read back. Anything else gets
+    real data only, which is what makes a stray demo run visible as
+    missing bars rather than as a plausible wrong price.
+
+    Read per call rather than at import for the same reason as db_path():
+    tests set INGEST_MODE per module.
+    """
+    if include_synthetic is None:
+        include_synthetic = os.environ.get("INGEST_MODE", "").lower() == SYNTHETIC
+    return "" if include_synthetic else f" AND {_REAL_ONLY}"
+
 
 def _columns(c, table):
     return [r["name"] for r in c.execute(f"PRAGMA table_info({table})")]
@@ -171,6 +204,17 @@ def _migrate(c):
               "DROP TABLE bars_pre_interval;"
         )
         print("[db] migrated bars to (symbol, interval, ts)")
+
+    # re-read: the interval rebuild above replaces the table wholesale, and
+    # the new DDL already carries `source`.
+    bar_cols = _columns(c, "bars")
+    if bar_cols and "source" not in bar_cols:
+        # No DEFAULT, for exactly the reason price_at has none below: a row
+        # written before provenance was recorded genuinely does not know
+        # where it came from. Stamping them all 'real' would certify the
+        # very demo bars this column exists to expose.
+        c.execute("ALTER TABLE bars ADD COLUMN source TEXT")
+        print("[db] migrated bars: added source")
 
     analysis_cols = _columns(c, "analyses")
     if analysis_cols and "interval" not in analysis_cols:
@@ -223,30 +267,41 @@ def conn():
         c.close()
 
 
-def insert_bar(symbol, interval, ts, o, h, l, cl, v):
+def insert_bar(symbol, interval, ts, o, h, l, cl, v, source=None):
     with conn() as c:
         c.execute(
-            f"INSERT OR REPLACE INTO bars ({_BAR_COLS}) VALUES (?,?,?,?,?,?,?,?)",
-            (symbol, interval, ts, o, h, l, cl, v),
+            f"INSERT OR REPLACE INTO bars ({_BAR_COLS}, source) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (symbol, interval, ts, o, h, l, cl, v, source),
         )
 
 
-def insert_bars(symbol, interval, bars):
-    """Bulk insert (history backfill). Existing rows are overwritten."""
+def insert_bars(symbol, interval, bars, source=None):
+    """Bulk insert (history backfill). Existing rows are overwritten.
+
+    `source` is the feed's own name, so a caller that already holds a
+    source object passes `source.name` and cannot get it wrong - demo mode
+    resolves to the demo source and therefore stamps 'demo' by itself.
+    """
     with conn() as c:
         c.executemany(
-            f"INSERT OR REPLACE INTO bars ({_BAR_COLS}) VALUES (?,?,?,?,?,?,?,?)",
+            f"INSERT OR REPLACE INTO bars ({_BAR_COLS}, source) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             [(symbol, interval, b["ts"], b["open"], b["high"],
-              b["low"], b["close"], b["volume"]) for b in bars],
+              b["low"], b["close"], b["volume"], source) for b in bars],
         )
 
 
-def delete_bars(symbol, interval=None) -> int:
-    """Drop stored bars for a symbol, optionally one interval only.
+def delete_bars(symbol, interval=None, source=None) -> int:
+    """Drop stored bars for a symbol, optionally one interval or source.
 
     Bars are derived data - re-fetchable from the source - so clearing and
     refilling is the safe way to evict a contaminated series. Always
     scoped to a symbol; there is deliberately no "delete everything".
+
+    `source=SYNTHETIC` is the cheap version of the segment hunt that used
+    to be necessary: once provenance is recorded, evicting demo bars is a
+    fact about the row rather than an inference from its timestamp.
     """
     if not symbol:
         raise ValueError("delete_bars requires a symbol")
@@ -255,25 +310,54 @@ def delete_bars(symbol, interval=None) -> int:
     if interval:
         sql += " AND interval=?"
         params.append(interval)
+    if source:
+        sql += " AND source=?"
+        params.append(source)
     with conn() as c:
         return c.execute(sql, params).rowcount
 
 
-def active_interval(symbol):
+def delete_bars_range(symbol, interval, start_ts, end_ts) -> int:
+    """Drop stored bars for a symbol inside an inclusive timestamp window.
+
+    The narrow sibling of `delete_bars`, for when only part of a series is
+    contaminated and the rest is worth keeping. The window is the whole
+    argument for the deletion - a segment identified by its timestamps -
+    so both ends are required and both are inclusive. Callers name a time
+    range they can defend, never a price range: a bad segment is
+    recognised by when it arrived, not by what it cost.
+    """
+    if not symbol or not interval:
+        raise ValueError("delete_bars_range requires a symbol and an interval")
+    if start_ts > end_ts:
+        raise ValueError("start_ts must not be after end_ts")
+    with conn() as c:
+        return c.execute(
+            "DELETE FROM bars WHERE symbol=? AND interval=? AND ts BETWEEN ? AND ?",
+            (symbol, interval, start_ts, end_ts),
+        ).rowcount
+
+
+def active_interval(symbol, include_synthetic=None):
     """The interval of the newest stored bar for a symbol, if any.
 
     Lets callers that do not care about intervals - the analyzer - keep
     asking for "this symbol's bars" and get a single coherent series.
+
+    Filtered like every other reader: a stray demo bar must not be able to
+    decide which interval the rest of the system then works in.
     """
     with conn() as c:
         r = c.execute(
-            "SELECT interval FROM bars WHERE symbol=? ORDER BY ts DESC LIMIT 1",
+            "SELECT interval FROM bars WHERE symbol=?"
+            f"{_real_only(include_synthetic)} ORDER BY ts DESC LIMIT 1",
             (symbol,),
         ).fetchone()
     return r["interval"] if r else None
 
 
-def recent_bars(symbol, limit=100, interval=None, as_of_ts=None):
+def recent_bars(symbol, limit=100, interval=None, as_of_ts=None,
+                include_synthetic=None):
     """Newest `limit` bars at or before `as_of_ts`, oldest first.
 
     `interval=None` means the most recently ingested interval for this
@@ -284,11 +368,11 @@ def recent_bars(symbol, limit=100, interval=None, as_of_ts=None):
     live path an analysis of bar N could previously read bars newer than N
     whenever the analyzer lagged ingest or a message was redelivered.
     """
-    interval = interval or active_interval(symbol)
+    interval = interval or active_interval(symbol, include_synthetic)
     if interval is None:
         return []
 
-    where = "symbol=? AND interval=?"
+    where = "symbol=? AND interval=?" + _real_only(include_synthetic)
     params = [symbol, interval]
     if as_of_ts:
         where += " AND ts <= ?"
@@ -302,20 +386,26 @@ def recent_bars(symbol, limit=100, interval=None, as_of_ts=None):
     return [dict(r) for r in reversed(rows)]
 
 
-def count_bars_before(symbol, interval, ts) -> int:
+def count_bars_before(symbol, interval, ts, include_synthetic=None) -> int:
     """How much history precedes a bar - the analyzer needs MIN_BARS of it."""
     with conn() as c:
         return c.execute(
-            "SELECT COUNT(*) FROM bars WHERE symbol=? AND interval=? AND ts < ?",
+            "SELECT COUNT(*) FROM bars WHERE symbol=? AND interval=? AND ts < ?"
+            + _real_only(include_synthetic),
             (symbol, interval, ts)).fetchone()[0]
 
 
-def bars_in_range(symbol, interval, start_ts, end_ts):
-    """Every stored bar in a window, oldest first. The replay source."""
+def bars_in_range(symbol, interval, start_ts, end_ts, include_synthetic=None):
+    """Every stored bar in a window, oldest first. The replay source.
+
+    Filtered too: a replay is evidence about the model, and it is worth
+    nothing if the series underneath was partly invented.
+    """
     with conn() as c:
         rows = c.execute(
-            "SELECT * FROM bars WHERE symbol=? AND interval=? AND ts BETWEEN ? AND ? "
-            "ORDER BY ts ASC", (symbol, interval, start_ts, end_ts)).fetchall()
+            "SELECT * FROM bars WHERE symbol=? AND interval=? AND ts BETWEEN ? AND ?"
+            + _real_only(include_synthetic)
+            + " ORDER BY ts ASC", (symbol, interval, start_ts, end_ts)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -457,7 +547,7 @@ _SCORE_COLS = (
 )
 
 
-def bars_after(symbol, interval, ts, limit):
+def bars_after(symbol, interval, ts, limit, include_synthetic=None):
     """Bars STRICTLY after ts, oldest first.
 
     The scorer's only view of the future, and the mirror of recent_bars'
@@ -466,8 +556,9 @@ def bars_after(symbol, interval, ts, limit):
     """
     with conn() as c:
         rows = c.execute(
-            "SELECT * FROM bars WHERE symbol=? AND interval=? AND ts > ? "
-            "ORDER BY ts ASC LIMIT ?", (symbol, interval, ts, limit)).fetchall()
+            "SELECT * FROM bars WHERE symbol=? AND interval=? AND ts > ?"
+            + _real_only(include_synthetic)
+            + " ORDER BY ts ASC LIMIT ?", (symbol, interval, ts, limit)).fetchall()
     return [dict(r) for r in rows]
 
 

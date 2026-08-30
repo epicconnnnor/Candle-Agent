@@ -42,6 +42,9 @@ services:
     environment:
       NATS_URL: nats://nats:4222
       DB_PATH: /data/candle_agent.db
+      # bar reads are real-data-only unless this says demo; it must match
+      # ingest or a demo deployment hides the very bars it just wrote
+      INGEST_MODE: ${INGEST_MODE:-demo}
       ANALYZE_EVERY: ${ANALYZE_EVERY:-1}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}   # mock runs with zero keys
       LLM_BASE_URL: ${LLM_BASE_URL:-}
@@ -61,6 +64,9 @@ services:
     environment:
       NATS_URL: nats://nats:4222
       DB_PATH: /data/candle_agent.db
+      # bar reads are real-data-only unless this says demo; it must match
+      # ingest or a demo deployment hides the very bars it just wrote
+      INGEST_MODE: ${INGEST_MODE:-demo}
       # replay refuses to start unless the analyzer sees ANALYZE_EVERY=1,
       # so both services must read the same value
       ANALYZE_EVERY: ${ANALYZE_EVERY:-1}
@@ -80,6 +86,9 @@ services:
     environment:
       NATS_URL: nats://nats:4222
       DB_PATH: /data/candle_agent.db
+      # bar reads are real-data-only unless this says demo; it must match
+      # ingest or a demo deployment hides the very bars it just wrote
+      INGEST_MODE: ${INGEST_MODE:-demo}
       RISK_PER_TRADE: ${RISK_PER_TRADE:-100}
       METRICS_PORT: "9103"
     volumes: [agent-data:/data]
@@ -94,6 +103,9 @@ services:
     environment:
       NATS_URL: nats://nats:4222
       DB_PATH: /data/candle_agent.db
+      # bar reads are real-data-only unless this says demo; it must match
+      # ingest or a demo deployment hides the very bars it just wrote
+      INGEST_MODE: ${INGEST_MODE:-demo}
       # the api builds its own source registry to serve GET /symbols and to
       # validate POST /subscribe, so it needs the same source config as ingest
       INTERVAL: ${INTERVAL:-1m}
