@@ -191,3 +191,65 @@ def test_ingest_rejection_is_surfaced(client):
     r = client.post("/subscribe", json={"symbol": SYMBOL, "interval": "1m"})
     assert r.status_code == 400
     assert "interval not supported" in r.json()["detail"]
+
+
+# --- /api/chat ---------------------------------------------------------
+
+def _store_analysis(symbol="CHATME"):
+    db.insert_bars(symbol, "1m", ramp(60), source="alpaca")
+    return db.insert_analysis(
+        symbol, 1_700_000_000_000,
+        {"regime": "range", "strength": "weak", "key_levels": [99.0, 101.0],
+         "summary": "overlapping bars, no structure"},
+        {"decision": "no_trade", "confidence": "low",
+         "reasoning_chain": ["no edge"], "entry": None, "stop": None,
+         "target": None, "risk_reward": None},
+        "mock", 120, interval="1m", price_at=100.0, atr_at=0.5)
+
+
+def test_chat_answers_about_the_stored_analysis(client):
+    _store_analysis()
+    r = client.post("/api/chat/CHATME", json={"message": "why no trade?"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["reply"]
+    assert body["analysis_ts"] == 1_700_000_000_000
+    assert body["key_source"] == "server"
+
+
+def test_chat_without_an_analysis_says_so(client):
+    db.insert_bars("NOANALYSIS", "1m", ramp(60), source="alpaca")
+    r = client.post("/api/chat/NOANALYSIS", json={"message": "what now?"})
+    assert r.status_code == 404
+    assert "Run an analysis first" in r.json()["detail"]
+
+
+def test_chat_never_writes_to_the_analyses_table(client):
+    """The scorer reads that table; an unvalidated answer must not land in it."""
+    _store_analysis("NOWRITE")
+    with db.conn() as c:
+        before = c.execute("SELECT COUNT(*) n FROM analyses").fetchone()["n"]
+
+    client.post("/api/chat/NOWRITE", json={"message": "explain the levels"})
+
+    with db.conn() as c:
+        after = c.execute("SELECT COUNT(*) n FROM analyses").fetchone()["n"]
+    assert after == before
+
+
+def test_chat_never_publishes_to_the_bus(stub, client):
+    """A keyed request on a persisted subject would write the key down.
+
+    FakeNC has no publish() at all, so a bus call here would raise rather
+    than pass quietly - the request succeeding IS the assertion.
+    """
+    _store_analysis("NOBUS")
+    before = len(stub.requests)
+    r = client.post("/api/chat/NOBUS", json={"message": "hello"})
+    assert r.status_code == 200, r.text
+    assert len(stub.requests) == before
+
+
+def test_chat_rejects_an_empty_message(client):
+    _store_analysis("EMPTYMSG")
+    assert client.post("/api/chat/EMPTYMSG", json={"message": ""}).status_code == 422

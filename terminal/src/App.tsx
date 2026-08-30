@@ -228,7 +228,9 @@ export default function App() {
     snapshotStage,
     diagnosisStage,
     decisionStage,
-    { name: "Follow-up", state: "idle", status: "local only · no backend" },
+    feed.analysis
+      ? { name: "Follow-up", state: "idle", status: "ask about this analysis" }
+      : { name: "Follow-up", state: "idle", status: "needs an analysis" },
   ];
 
   return (
@@ -337,7 +339,11 @@ export default function App() {
               stage1={feed.analysis?.stage1 ?? null}
               lastClose={last?.close ?? null}
             />
-            <ChatPanel />
+            <ChatPanel
+              symbol={symbol}
+              apiKey={apiKey}
+              hasAnalysis={Boolean(feed.analysis)}
+            />
           </div>
         </div>
       </main>

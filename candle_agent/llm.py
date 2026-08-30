@@ -72,6 +72,14 @@ class MockLLM:
         )
 
 
+    def converse(self, messages: list[dict], max_tokens: int = 500) -> str:
+        last = next((m["content"] for m in reversed(messages)
+                     if m.get("role") == "user"), "")
+        self.usage.append({"prompt_tokens": None, "completion_tokens": None})
+        return (f"(mock reply) You asked: {last[:120]} - the stored diagnosis "
+                "is the only thing I would cite here.")
+
+
 class OpenAICompatLLM:
     def __init__(self, api_key: str | None = None):
         """`api_key` overrides the server key for this instance only.
@@ -152,6 +160,42 @@ class OpenAICompatLLM:
             "completion_tokens": u.get("completion_tokens"),
             "total_tokens": u.get("total_tokens"),
             # DeepSeek reports cache hits/misses; they price differently
+            "cache_hit_tokens": u.get("prompt_cache_hit_tokens"),
+            "cache_miss_tokens": u.get("prompt_cache_miss_tokens"),
+        })
+        return body["choices"][0]["message"]["content"]
+
+
+    def converse(self, messages: list[dict], max_tokens: int = 500) -> str:
+        """Free-text multi-turn completion. Prose, not a contract.
+
+        Deliberately omits response_format, for the reason ping() gives:
+        providers implementing json_object mode reject any request whose
+        messages do not contain the word "json". It would also be the
+        wrong shape - a follow-up answer has no schema to satisfy, and
+        forcing one would be decoration rather than validation.
+
+        Warmer than complete()'s 0.2: this is explanation, and the
+        analysis path is the one that needs determinism.
+        """
+        resp = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json={
+                "model": self.model,
+                "temperature": 0.4,
+                "max_tokens": max_tokens,
+                "messages": messages,
+            },
+            timeout=60,
+        )
+        self._raise_for_status(resp)
+        body = resp.json()
+        u = body.get("usage") or {}
+        self.usage.append({
+            "prompt_tokens": u.get("prompt_tokens"),
+            "completion_tokens": u.get("completion_tokens"),
+            "total_tokens": u.get("total_tokens"),
             "cache_hit_tokens": u.get("prompt_cache_hit_tokens"),
             "cache_miss_tokens": u.get("prompt_cache_miss_tokens"),
         })

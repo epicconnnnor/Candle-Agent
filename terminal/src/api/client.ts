@@ -10,6 +10,8 @@ import type {
   Bar,
   BarClosed,
   BarRow,
+  ChatReply,
+  ChatTurn,
   ConnectionState,
   IngestStatus,
   InlineAnalysis,
@@ -140,6 +142,26 @@ export const requestAnalysis = (symbol: string, apiKey?: string | null) =>
     `/api/analyze/${encodeURIComponent(symbol)}`,
     { method: "POST", headers: keyHeader(apiKey) },
   );
+
+/**
+ * Ask a follow-up question about the stored analysis.
+ *
+ * Always inline - there is no queued form. The server trims the history
+ * it is sent, so passing the whole visible conversation is safe; it is
+ * capped here too so a long session does not ship a large body only to
+ * have most of it discarded.
+ */
+export const askFollowUp = (
+  symbol: string,
+  message: string,
+  history: ChatTurn[],
+  apiKey?: string | null,
+) =>
+  request<ChatReply>(`/api/chat/${encodeURIComponent(symbol)}`, {
+    method: "POST",
+    headers: keyHeader(apiKey),
+    body: JSON.stringify({ message, history: history.slice(-12) }),
+  });
 
 /** Minimal upstream call to tell a good key from a bad one. */
 export const testKey = (apiKey: string) =>

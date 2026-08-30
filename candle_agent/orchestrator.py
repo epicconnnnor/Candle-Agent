@@ -45,9 +45,17 @@ def prompt_fingerprint() -> str:
       the model was asked or what it was held to. A score run that pools
       across such a change is pooling two different questions, and
       services/scorer.py refuses it.
+
+    The glob is `stage*.txt`, not `*.txt`, and the narrowness is the
+    point: the fingerprint covers the ANALYSIS contract. The follow-up
+    chat prompt lives in the same directory and deliberately does not
+    move it, because it changes nothing about what stage 1 or stage 2 is
+    asked or held to. A new file that does belong to the contract must be
+    named to match, which is a convention the reader can see rather than
+    a rule buried in a hash.
     """
     h = hashlib.sha256()
-    for path in sorted(PROMPTS.glob("*.txt")):
+    for path in sorted(PROMPTS.glob("stage*.txt")):
         h.update(path.name.encode())
         h.update(path.read_bytes())
     for schema in (STAGE1_SCHEMA, STAGE2_SCHEMA):

@@ -11,6 +11,12 @@ Both halves are asserted from the actual outbound request body, not from
 reading the source, so a future edit to either the prompts or the client
 breaks the test rather than production.
 
+The rule is scoped to the ANALYSIS prompts (stage*.txt), because they are
+the ones complete() sends with response_format. The follow-up chat prompt
+goes through converse(), which sets no response_format at all - so it is
+held to the other half of the implication instead: no json mode, no
+obligation to mention json.
+
 The word is required in LOWERCASE. OpenAI's implementation of this check
 is case-insensitive, but DeepSeek's is not documented as such, and a
 lowercase occurrence satisfies either reading.
@@ -25,6 +31,7 @@ os.environ["DB_PATH"] = os.path.join(tempfile.gettempdir(), "test_prompt_contrac
 os.environ["LLM_BASE_URL"] = "https://api.example.com/v1"
 os.environ["LLM_MODEL"] = "test-model"
 
+from candle_agent import chat
 from candle_agent import llm as llm_mod
 from candle_agent.llm import OpenAICompatLLM
 from candle_agent.orchestrator import PROMPTS, ROUTES
@@ -56,9 +63,9 @@ def sent(monkeypatch):
 
 # --- the prompts themselves --------------------------------------------
 
-def test_every_prompt_file_contains_lowercase_json():
+def test_every_analysis_prompt_contains_lowercase_json():
     missing = [
-        f.name for f in sorted(PROMPTS.glob("*.txt"))
+        f.name for f in sorted(PROMPTS.glob("stage*.txt"))
         if "json" not in f.read_text(encoding="utf-8")
     ]
     assert not missing, (
@@ -107,13 +114,33 @@ def test_the_invariant_holds_for_every_request_the_client_makes(sent):
     """response_format set => messages mention json. Checked over both paths."""
     llm = OpenAICompatLLM(api_key=KEY)
     llm.ping()
-    for name in sorted(p.name for p in PROMPTS.glob("*.txt")):
+    for name in sorted(p.name for p in PROMPTS.glob("stage*.txt")):
         llm.complete((PROMPTS / name).read_text(encoding="utf-8"), "last close: 100.0")
+    # the follow-up path, which must never carry response_format
+    llm.converse([{"role": "system", "content": chat.system_prompt()},
+                  {"role": "user", "content": "why no trade?"}])
 
-    assert len(sent) == 1 + len(list(PROMPTS.glob("*.txt")))
+    assert len(sent) == 2 + len(list(PROMPTS.glob("stage*.txt")))
     for body in sent:
         if body.get("response_format", {}).get("type") == "json_object":
             assert "json" in json.dumps(body["messages"]), body["messages"][0]["content"][:80]
+
+
+def test_converse_sets_no_response_format(sent):
+    """The other half of the implication.
+
+    A follow-up answer is prose, so it must not request json mode - and
+    because it does not, the chat prompt is free of the obligation to say
+    "json", which would otherwise be a stray word in a plain-English
+    instruction.
+    """
+    llm = OpenAICompatLLM(api_key=KEY)
+    llm.converse([{"role": "system", "content": chat.system_prompt()},
+                  {"role": "user", "content": "explain the levels"}])
+
+    body = sent[0]
+    assert "response_format" not in body
+    assert "json" not in chat.system_prompt()
 
 
 # --- analysis provenance columns ----------------------------------------
