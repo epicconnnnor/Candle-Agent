@@ -518,3 +518,54 @@ def test_ingest_stamps_the_feed_that_produced_each_bar(monkeypatch):
                             include_synthetic=True)
     assert stored, "the fake feed wrote nothing"
     assert {b["source"] for b in stored} == {"fake"}
+
+
+# --- risk/reward geometry ----------------------------------------------
+
+def test_risk_reward_comes_from_the_prices_not_the_claim():
+    """A reply may assert any rr it likes; the gate uses the geometry."""
+    from candle_agent import schemas
+
+    lying = {"decision": "buy_limit", "entry": 100.0, "stop": 99.0,
+             "target": 100.5, "risk_reward": 9.9, "confidence": "high",
+             "reasoning_chain": ["x"]}
+
+    # claimed 9.9, actual 0.5 / 1.0 = 0.5
+    assert schemas.risk_reward(100.0, 99.0, 100.5) == 0.5
+    errs = schemas.consistency_errors(lying)
+    assert any("below the 1.5 floor" in e for e in errs)
+
+
+def test_the_floor_is_the_playbook_floor():
+    from candle_agent import schemas
+
+    # 1.2 satisfied the old 1.0 validator while violating the stated gate
+    at_1_2 = {"decision": "buy_limit", "entry": 100.0, "stop": 99.0,
+              "target": 101.2, "risk_reward": 1.2, "confidence": "low",
+              "reasoning_chain": ["x"]}
+    assert schemas.consistency_errors(at_1_2)
+
+    at_1_5 = dict(at_1_2, target=101.5, risk_reward=1.5)
+    assert schemas.consistency_errors(at_1_5) == []
+
+
+def test_a_setup_exactly_on_the_floor_is_not_decided_by_float_noise():
+    """Score run 6's Tue 08-25 14:59 short cleared 1.5 by 6e-14."""
+    from candle_agent import schemas
+
+    rr = schemas.risk_reward(309.07, 309.53, 308.38)
+    assert rr == 1.5000000000000617        # the float reality
+    on_floor = {"decision": "market_sell", "entry": 309.07, "stop": 309.53,
+                "target": 308.38, "risk_reward": 1.5, "confidence": "medium",
+                "reasoning_chain": ["x"]}
+    assert schemas.consistency_errors(on_floor) == []
+
+
+def test_zero_risk_is_malformed_not_infinitely_good():
+    from candle_agent import schemas
+
+    assert schemas.risk_reward(100.0, 100.0, 101.0) is None
+    flat = {"decision": "buy_limit", "entry": 100.0, "stop": 100.0,
+            "target": 101.0, "risk_reward": 99.0, "confidence": "high",
+            "reasoning_chain": ["x"]}
+    assert any("no defined risk" in e for e in schemas.consistency_errors(flat))

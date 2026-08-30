@@ -55,7 +55,10 @@ CREATE TABLE IF NOT EXISTS analyses (
     -- measured from the provider's usage block, so cost estimates come
     -- from history rather than a character heuristic
     prompt_tokens INTEGER,
-    completion_tokens INTEGER
+    completion_tokens INTEGER,
+    -- identity of the prompt/schema/validator contract this verdict was
+    -- formed under. Two analyses are only comparable when these match.
+    prompt_fingerprint TEXT
 );
 CREATE TABLE IF NOT EXISTS paper_trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,7 +114,10 @@ CREATE TABLE IF NOT EXISTS score_runs (
     independent_windows INTEGER NOT NULL DEFAULT 0,
     summary_json TEXT,
     status TEXT NOT NULL,
-    detail TEXT
+    detail TEXT,
+    -- the contract every scored analysis shared; a run that could not
+    -- agree on one is refused rather than stored
+    prompt_fingerprint TEXT
 );
 CREATE TABLE IF NOT EXISTS analysis_scores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,12 +237,23 @@ def _migrate(c):
             c.execute(f"ALTER TABLE analyses ADD COLUMN {column} INTEGER")
             print(f"[db] migrated analyses: added {column}")
 
+    # Nullable for the same reason as price_at: rows written before the
+    # contract was recorded genuinely do not know which one they ran under,
+    # and inventing one would let them pool with rows that are not comparable.
+    if analysis_cols and "prompt_fingerprint" not in analysis_cols:
+        c.execute("ALTER TABLE analyses ADD COLUMN prompt_fingerprint TEXT")
+        print("[db] migrated analyses: added prompt_fingerprint")
+
     # DEFAULT 1 is honest here, unlike price_at above: every run that
     # predates this column really did publish every bar.
     score_cols = _columns(c, "score_runs")
     if score_cols and "replay_run_ids" not in score_cols:
         c.execute("ALTER TABLE score_runs ADD COLUMN replay_run_ids TEXT")
         print("[db] migrated score_runs: added replay_run_ids")
+
+    if score_cols and "prompt_fingerprint" not in score_cols:
+        c.execute("ALTER TABLE score_runs ADD COLUMN prompt_fingerprint TEXT")
+        print("[db] migrated score_runs: added prompt_fingerprint")
 
     run_cols = _columns(c, "replay_runs")
     if run_cols and "stride" not in run_cols:
@@ -411,16 +428,25 @@ def bars_in_range(symbol, interval, start_ts, end_ts, include_synthetic=None):
 
 def insert_analysis(symbol, ts, stage1, stage2, model, latency_ms, interval="1m",
                     price_at=None, atr_at=None,
-                    prompt_tokens=None, completion_tokens=None):
+                    prompt_tokens=None, completion_tokens=None,
+                    prompt_fingerprint=None):
     """`price_at` / `atr_at` capture the market at the moment of analysis, so
-    staleness can be judged later without guessing."""
+    staleness can be judged later without guessing.
+
+    `prompt_fingerprint` does the same for the question rather than the
+    market: it records which prompt and schema contract produced this
+    verdict, so a later score run can tell whether two rows are answers to
+    the same question or to two different ones.
+    """
     with conn() as c:
         cur = c.execute(
             "INSERT INTO analyses (symbol, ts, stage1, stage2, model, latency_ms, "
-            "interval, price_at, atr_at, prompt_tokens, completion_tokens) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "interval, price_at, atr_at, prompt_tokens, completion_tokens, "
+            "prompt_fingerprint) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (symbol, ts, json.dumps(stage1), json.dumps(stage2), model, latency_ms,
-             interval, price_at, atr_at, prompt_tokens, completion_tokens),
+             interval, price_at, atr_at, prompt_tokens, completion_tokens,
+             prompt_fingerprint),
         )
         return cur.lastrowid
 
@@ -531,7 +557,7 @@ _SCORE_RUN_COLS = ("replay_run_id", "replay_run_ids", "symbol", "interval",
                    "scorer_version",
                    "params_json", "created_at", "analyses_scored",
                    "analyses_incomplete", "independent_windows", "summary_json",
-                   "status", "detail")
+                   "status", "detail", "prompt_fingerprint")
 
 _SCORE_COLS = (
     "score_run_id", "analysis_id", "symbol", "interval", "bar_ts",

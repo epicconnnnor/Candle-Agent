@@ -39,6 +39,34 @@ def _run_ids(replay_run_id, symbol: str, interval: str) -> list[int] | None:
     return sorted(set(ids))
 
 
+def _one_contract(analyses: list[dict]) -> str | None:
+    """The prompt fingerprint every scored analysis shares.
+
+    The sibling of the symbol/interval check in _run_ids, and it exists
+    for the same reason: pooling is only meaningful over rows that answer
+    the same question. A prompt edit, a new schema field or a moved
+    validator gate all produce rows that look poolable and are not.
+
+    NULL is tolerated and does not mix: rows written before fingerprints
+    existed are all equally unknown, so a sample made entirely of them is
+    as coherent as it ever was. A sample that mixes known with unknown is
+    refused, because there is no way to tell whether they agree.
+    """
+    seen = {a.get("prompt_fingerprint") for a in analyses}
+    if len(seen) <= 1:
+        return next(iter(seen), None) if seen else None
+
+    known = sorted(f for f in seen if f)
+    unknown = sum(1 for a in analyses if not a.get("prompt_fingerprint"))
+    detail = ", ".join(known) + (f", and {unknown} rows with none recorded"
+                                 if unknown else "")
+    raise scoring.ScoringError(
+        f"these analyses were produced under {len(seen)} different prompt "
+        f"contracts ({detail}): pooling them would mix two different "
+        "questions into one sample. Score them separately, or bound the "
+        "run with start_ts/end_ts so it covers only one.")
+
+
 def run(symbol: str, interval: str, replay_run_id=None,
         overrides: dict | None = None, start_ts: int | None = None,
         end_ts: int | None = None) -> dict:
@@ -62,6 +90,9 @@ def run(symbol: str, interval: str, replay_run_id=None,
 
     interval_ms = to_ms(interval)
     analyses = db.analyses_for_scoring(symbol, interval, ids, start_ts, end_ts)
+    # before the run row exists: a refusal is a caller mistake, not a
+    # half-finished run to be explained later
+    fingerprint = _one_contract(analyses)
 
     run_id = db.create_score_run(
         # the scalar column stays populated only when there is exactly one,
@@ -74,6 +105,8 @@ def run(symbol: str, interval: str, replay_run_id=None,
         # score cannot be interpreted, only misread
         params_json=json.dumps({k: list(v) if isinstance(v, tuple) else v
                                 for k, v in params.items()}),
+        # the contract travels with the scores, exactly as the parameters do
+        prompt_fingerprint=fingerprint,
         created_at=int(time.time() * 1000), status="running")
 
     if not analyses:
