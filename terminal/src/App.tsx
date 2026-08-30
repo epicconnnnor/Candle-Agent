@@ -16,6 +16,7 @@ import PipelineStrip, { type Stage } from "./components/PipelineStrip";
 import MarketSummaryStrip from "./components/MarketSummaryStrip";
 import Button from "./components/ui/Button";
 import Card from "./components/ui/Card";
+import { forgetStoredKey, loadStoredKey, storeKey } from "./apiKeyStorage";
 import { useAnalyze } from "./hooks/useAnalyze";
 import { useFeed } from "./hooks/useFeed";
 import { atr } from "./lib/indicators";
@@ -42,10 +43,34 @@ export default function App() {
   const [revision, setRevision] = useState(0);
   const [source, setSource] = useState("—");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // The visitor's LLM key. React state ONLY: never localStorage,
-  // sessionStorage or a cookie, so a reload clears it. Deliberate - there
-  // is no "remember my key".
-  const [apiKey, setApiKey] = useState("");
+  // The visitor's LLM key. React state by default, so a reload clears it;
+  // localStorage only when the user opts in from Settings. Never a cookie,
+  // and never a server record either way.
+  //
+  // A key already in this browser means the user opted in previously, so
+  // both the value and the checkbox come back on. Absent that, persistence
+  // is off: a credential is not remembered unless someone asked for it.
+  const [apiKey, setApiKeyState] = useState(loadStoredKey);
+  const [rememberKey, setRememberKey] = useState(() => Boolean(loadStoredKey()));
+
+  const setApiKey = (key: string) => {
+    setApiKeyState(key);
+    if (rememberKey) storeKey(key);
+  };
+
+  const setRemember = (remember: boolean) => {
+    setRememberKey(remember);
+    // unchecking drops the saved copy but keeps the key usable for this
+    // session - the box controls persistence, not the current request
+    if (remember) storeKey(apiKey);
+    else forgetStoredKey();
+  };
+
+  const forgetKey = () => {
+    setApiKeyState("");
+    setRememberKey(false);
+    forgetStoredKey();
+  };
 
   const chart = useRef<ChartHandle>(null);
 
@@ -355,6 +380,9 @@ export default function App() {
           onClose={() => setSettingsOpen(false)}
           apiKey={apiKey}
           onApiKey={setApiKey}
+          remember={rememberKey}
+          onRemember={setRemember}
+          onForget={forgetKey}
         />
       )}
     </div>

@@ -45,9 +45,12 @@ export class ApiError extends Error {
  * Attach a visitor's LLM key to one request.
  *
  * A header, never a query string: URLs land in browser history, proxy
- * logs and server access logs. The key is held in React state only - it
- * is never written to localStorage, sessionStorage or a cookie, and is
- * gone on reload. There is deliberately no "remember my key".
+ * logs and server access logs.
+ *
+ * Where the key rests is the user's choice and is made in Settings: React
+ * state only by default, or this browser's localStorage if they opt in.
+ * See apiKeyStorage.ts. Neither is a server record - the key is sent with
+ * the requests that need it and is never persisted server-side.
  */
 const keyHeader = (key?: string | null): Record<string, string> =>
   key ? { "X-LLM-Key": key } : {};
