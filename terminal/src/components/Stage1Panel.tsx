@@ -4,6 +4,18 @@ import Button from "./ui/Button";
 import type { AnalysisCompleted } from "../api/types";
 import type { Freshness } from "../lib/freshness";
 
+/**
+ * What each cycle label asserts, in the two facts it decomposes into:
+ * whether the range is expanding, and whether price is going anywhere.
+ * The word alone is not self-explanatory, so it never appears alone.
+ */
+const CYCLE_NOTE: Record<string, string> = {
+  compression: "range steady or narrowing, no direction",
+  breakout: "range expanding, price making progress",
+  trend: "range steady, price making progress",
+  exhaustion: "range expanding, price going nowhere",
+};
+
 interface Props {
   analysis: AnalysisCompleted | null;
   symbol: string;
@@ -94,6 +106,18 @@ export default function Stage1Panel({
       <div className="mt-4">
         <CardRows>
           <CardRow label="Regime">{stage1.regime.replace("_", " ")}</CardRow>
+          <CardRow
+            label={
+              <span className="flex flex-col">
+                <span>Cycle</span>
+                <span className="text-[12px] leading-snug text-label">
+                  {CYCLE_NOTE[stage1.cycle]}
+                </span>
+              </span>
+            }
+          >
+            {stage1.cycle}
+          </CardRow>
           <CardRow label="Strength">{stage1.strength}</CardRow>
           <CardRow label="Confidence">{stage2.confidence}</CardRow>
           <CardRow label="Model">

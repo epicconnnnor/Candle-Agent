@@ -1,4 +1,6 @@
 import type { Bar } from "../types";
+import { formatTime } from "../lib/timezone";
+import type { Zone } from "../lib/timezone";
 
 interface Props {
   bar: Bar;
@@ -6,6 +8,7 @@ interface Props {
   atr: number;
   symbol: string;
   timeframe: string;
+  zone: Zone;
 }
 
 interface Group {
@@ -19,12 +22,14 @@ interface Group {
  * monospace value, 6px between the two, 24px between groups with a 1px rule.
  * No icons here - this row is all data.
  */
-export default function OhlcStrip({ bar, prevClose, atr, symbol, timeframe }: Props) {
+export default function OhlcStrip({
+  bar, prevClose, atr, symbol, timeframe, zone,
+}: Props) {
   const up = bar.close >= prevClose;
-  const time = new Date(bar.time * 1000).toISOString().slice(11, 16);
 
   const groups: Group[] = [
-    { label: "Time", value: `${time} UTC` },
+    // bar.time is epoch SECONDS; every other timestamp here is ms
+    { label: "Time", value: formatTime(bar.time * 1000, zone, false) },
     { label: "Open", value: bar.open.toFixed(2) },
     { label: "High", value: bar.high.toFixed(2) },
     { label: "Low", value: bar.low.toFixed(2) },

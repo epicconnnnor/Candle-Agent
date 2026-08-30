@@ -1,22 +1,21 @@
 import { AlertTriangle, Clock, Info } from "lucide-react";
 import type { IngestStatus } from "../api/types";
+import { formatDayTime } from "../lib/timezone";
+import type { Zone } from "../lib/timezone";
 
 interface Props {
   problem: IngestStatus | null;
   market: IngestStatus | null;
   backfill: IngestStatus | null;
+  zone: Zone;
 }
 
-/** "2026-08-28T09:30:00-04:00" -> "Fri 09:30" in the viewer's zone. */
-function whenOpen(iso?: string | null): string {
+/** "2026-08-28T09:30:00-04:00" -> "Fri 09:30 EDT" in the chosen zone. */
+function whenOpen(iso: string | null | undefined, zone: Zone): string {
   if (!iso) return "an unannounced time";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(undefined, {
-    weekday: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return formatDayTime(d.getTime(), zone);
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -40,7 +39,7 @@ function problemLabel(s: IngestStatus): string {
  * missed. An empty chart with no explanation is the failure mode this
  * exists to prevent, so each status class gets its own visible treatment.
  */
-export default function StatusBanner({ problem, market, backfill }: Props) {
+export default function StatusBanner({ problem, market, backfill, zone }: Props) {
   if (!problem && !market && !backfill) return null;
 
   return (
@@ -74,7 +73,7 @@ export default function StatusBanner({ problem, market, backfill }: Props) {
           <p className="text-[13px] text-muted">
             <span className="text-ctl-text">Market closed.</span> Showing stored
             history — live bars resume at{" "}
-            <span className="num text-ctl-text">{whenOpen(market.next_open)}</span>.
+            <span className="num text-ctl-text">{whenOpen(market.next_open, zone)}</span>.
           </p>
         </div>
       )}

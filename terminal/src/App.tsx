@@ -13,7 +13,6 @@ import ChatPanel from "./components/ChatPanel";
 import SettingsModal from "./components/SettingsModal";
 import StatusBanner from "./components/StatusBanner";
 import PipelineStrip, { type Stage } from "./components/PipelineStrip";
-import MarketSummaryStrip from "./components/MarketSummaryStrip";
 import Button from "./components/ui/Button";
 import Card from "./components/ui/Card";
 import { forgetStoredKey, loadStoredKey, storeKey } from "./apiKeyStorage";
@@ -22,6 +21,8 @@ import { useFeed } from "./hooks/useFeed";
 import { atr } from "./lib/indicators";
 import { loadRecent } from "./lib/recent";
 import { freshnessOf } from "./lib/freshness";
+import { loadZone, storeZone } from "./lib/timezone";
+import type { Zone } from "./lib/timezone";
 import { getAnalysis, getSymbols, hasStatus, subscribe } from "./api/client";
 import type { Bar, IngestStatus, Interval, SymbolInfo } from "./api/types";
 
@@ -70,6 +71,14 @@ export default function App() {
     setApiKeyState("");
     setRememberKey(false);
     forgetStoredKey();
+  };
+
+  // A display preference, not a credential, so it persists without being
+  // asked for. Nothing stored or sent anywhere changes with it.
+  const [zone, setZoneState] = useState<Zone>(loadZone);
+  const setZone = (next: Zone) => {
+    setZoneState(next);
+    storeZone(next);
   };
 
   const chart = useRef<ChartHandle>(null);
@@ -228,25 +237,34 @@ export default function App() {
         ? { name: "Snapshot", state: "running", status: "building feature packet" }
         : { name: "Snapshot", state: "idle", status: "awaiting next run" };
 
+  // A pipeline cell reports where the run got to, never what it concluded.
+  // The verdict is in the cards below, once - repeating it here was the
+  // same answer in two places, drifting apart whenever one updated first.
+  const stage1Seconds =
+    prog.stage1At !== null && prog.snapshotAt !== null
+      ? (prog.stage1At - prog.snapshotAt) / 1000
+      : null;
+
   const diagnosisStage: Stage =
     prog.stage1At !== null
       ? { name: "Diagnosis", state: "done",
-          status: feed.analysis ? feed.analysis.stage1.regime.replace("_", " ") : "validated" }
+          status: stage1Seconds !== null ? `done · ${stage1Seconds.toFixed(1)}s` : "done" }
       : prog.snapshotAt !== null
         // snapshot landed, stage 1 has not: it is running right now
         ? { name: "Diagnosis", state: "running", status: "stage 1 running" }
         : feed.analysis
-          ? { name: "Diagnosis", state: "done", status: feed.analysis.stage1.regime.replace("_", " ") }
+          // restored from storage: it finished, but not in this session, so
+          // there is no elapsed time to report
+          ? { name: "Diagnosis", state: "done", status: "done" }
           : { name: "Diagnosis", state: "idle", status: "no analysis yet" };
 
   const decisionStage: Stage =
     prog.completedAt !== null && feed.analysis
-      ? { name: "Decision", state: "done",
-          status: `${feed.analysis.stage2.decision.replace("_", " ")} · ${feed.analysis.latency_ms} ms` }
+      ? { name: "Decision", state: "done", status: "done" }
       : prog.stage1At !== null
         ? { name: "Decision", state: "running", status: "stage 2 running" }
         : feed.analysis
-          ? { name: "Decision", state: "done", status: feed.analysis.stage2.decision.replace("_", " ") }
+          ? { name: "Decision", state: "done", status: "done" }
           : { name: "Decision", state: "idle", status: "no decision yet" };
 
   const stages: Stage[] = [
@@ -285,6 +303,7 @@ export default function App() {
 
       {last && (
         <OhlcStrip
+          zone={zone}
           bar={last}
           prevClose={prev?.close ?? last.close}
           atr={atr14}
@@ -296,16 +315,13 @@ export default function App() {
       <main className="mx-auto flex max-w-[1400px] flex-col gap-4 px-4 py-4">
         {/* alerts are global context like the strip above, not a module */}
         <StatusBanner
+          zone={zone}
           problem={problem}
           market={feed.notices.market}
           backfill={feed.notices.backfill}
         />
 
         <PipelineStrip stages={stages} lastEventAt={feed.lastEventAt} />
-        <MarketSummaryStrip
-          stage1={feed.analysis?.stage1 ?? null}
-          lastClose={last?.close ?? null}
-        />
 
         {/* main column and sidebar at 2:1; the sidebar stacks below 1100px */}
         <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-[2fr_1fr]">
@@ -325,6 +341,7 @@ export default function App() {
                             ${subscribing ? "pointer-events-none opacity-40" : "opacity-100"}`}
               >
                 <Chart
+                  zone={zone}
                   ref={chart}
                   bars={bars}
                   stage1={feed.analysis?.stage1 ?? null}
@@ -357,6 +374,7 @@ export default function App() {
 
           <div className="flex min-w-0 flex-col gap-4">
             <SessionCard
+              zone={zone}
               connection={feed.connection}
               usingOwnKey={Boolean(apiKey)}
               source={source}
@@ -380,6 +398,8 @@ export default function App() {
           onClose={() => setSettingsOpen(false)}
           apiKey={apiKey}
           onApiKey={setApiKey}
+          zone={zone}
+          onZone={setZone}
           remember={rememberKey}
           onRemember={setRemember}
           onForget={forgetKey}
