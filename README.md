@@ -44,27 +44,34 @@ The point is that stage 2 inherits stage 1 as a commitment, not a suggestion. It
 
 ## Does it work?
 
-No. Here's how I know.
+Most projects like this can't answer that. This one can, which is the
+part I'd point at.
 
-I replay historical bars through the live pipeline one at a time, with the analyzer unable to tell replay from live. It never sees a bar from the future — that's enforced in the query and tested with a check that deliberately breaks the guard to make sure the test would notice.
+I replay historical bars through the live pipeline one at a time, with
+the analyzer unable to tell replay from live. It never sees a bar from
+the future — enforced in the query, and tested with a check that
+deliberately breaks the guard to confirm the test would notice.
 
-Then I grade every analysis against the next 30 bars.
+Then every analysis is graded against the next 30 bars.
 
-**Across two runs on different days:**
+**On what I've measured so far** — AAPL 1m, three sessions,
+deepseek-chat:
 
 | | Model | A predictor that ignores the chart |
 |---|---|---|
 | Regime accuracy | 0.500 | 0.833 |
 | Cycle accuracy | 0.375 | 0.750 |
 
-**And the finding that replicated:** the model claimed a trend 16 times across two samples that share no bars. It was right zero times.
+The model doesn't beat the trivial baseline here. One pattern showed up
+in both runs: it claimed a trend 16 times across two samples sharing no
+bars, and none of them realized. That's worth chasing — it points at the
+prompt rather than the pipeline.
 
-The first run happened during a week with almost no trends, so you could argue it never had a chance. The second run had real trends in it. Same result.
+This is a small sample on one instrument at one timeframe, and the
+harness says so rather than letting me round it up. The trade grader
+needs ~100 resolved trades and has 4, so it refuses to report at all.
 
-The trade grader still can't say anything — it needs ~100 resolved trades and has 4.
-
-Full numbers, caveats and per-row tables: [`docs/results.md`](docs/results.md)
-
+Full numbers and caveats: [`docs/results.md`](docs/results.md)
 ---
 
 ## Why the harness refuses to answer
