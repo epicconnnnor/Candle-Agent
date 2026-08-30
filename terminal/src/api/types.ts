@@ -29,11 +29,37 @@ export type Decision =
 export type AssetClass = "crypto" | "equity";
 export type Interval = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
 
+/**
+ * Where the market sits on the compression/expansion cycle.
+ *
+ * The four values are the corners of two binary facts - is the amplitude
+ * expanding, is price going anywhere - which is what lets the scoring
+ * layer compute a realized counterpart from price alone.
+ */
+export type Cycle = "compression" | "breakout" | "trend" | "exhaustion";
+
 export interface Stage1 {
   regime: Regime;
+  cycle: Cycle;
   strength: Strength;
   key_levels: number[];
   summary: string;
+}
+
+/** The four checklist nodes, in the fixed order stage 2 must answer them. */
+export const PATH_NODES = [
+  "trend_alignment",
+  "level_proximity",
+  "stop_placement",
+  "risk_reward",
+] as const;
+
+export type PathNode = (typeof PATH_NODES)[number];
+
+export interface PathStep {
+  node: PathNode;
+  answer: string;
+  because: string;
 }
 
 export interface Stage2 {
@@ -44,6 +70,7 @@ export interface Stage2 {
   risk_reward: number | null;
   confidence: Confidence;
   reasoning_chain: string[];
+  decision_path: PathStep[];
 }
 
 // --- bars ---------------------------------------------------------------

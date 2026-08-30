@@ -37,16 +37,32 @@ export default function MarketSummaryStrip({
 }) {
   const { support, resistance } = zones(stage1, lastClose);
 
+  // what each label asserts, in the two facts it decomposes into
+  const CYCLE_NOTE: Record<string, string> = {
+    compression: "range steady or narrowing, no direction",
+    breakout: "range expanding, price making progress",
+    trend: "range steady, price making progress",
+    exhaustion: "range expanding, price going nowhere",
+  };
+
   const cells: Cell[] = [
     {
       label: "Current trend",
       value: stage1 ? `${stage1.regime.replace("_", " ")} · ${stage1.strength}` : DASH,
     },
-    // Stage 1 returns only regime, strength, key_levels and summary, and its
-    // schema sets additionalProperties:false - so neither cycle field can be
-    // populated without a prompt and schema change.
-    { label: "Current market cycle", value: DASH, note: "not in stage 1 schema" },
-    { label: "Next market cycle", value: DASH, note: "not in stage 1 schema" },
+    {
+      label: "Current market cycle",
+      value: stage1?.cycle ?? DASH,
+      note: stage1 ? CYCLE_NOTE[stage1.cycle] : undefined,
+    },
+    // Stage 1 describes the market; it does not forecast it. That split is
+    // deliberate - a diagnosis that predicts cannot be graded against what
+    // the window actually did - so there is no "next" to show.
+    {
+      label: "Next market cycle",
+      value: DASH,
+      note: "stage 1 describes, it does not forecast",
+    },
     { label: "Support zone", value: support, numeric: true },
     { label: "Resistance zone", value: resistance, numeric: true },
   ];
