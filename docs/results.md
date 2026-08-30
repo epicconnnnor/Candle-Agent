@@ -184,6 +184,22 @@ Tue 08-25 17:29   buy_limit  309.605 / stop 309.515 / target 309.860  -> stop   
 Thu 08-27 16:00  sell_limit  314.950 / stop 315.120 / target 314.430  -> target    R=+3.06   mae=-0.118  mfe=+3.235
 ```
 
+**Geometry verified, after the fact.** These six were re-checked against
+`|target-entry| / |entry-stop|` once the validator was fixed to derive
+risk-reward instead of trusting the model's own field. **All six clear the
+1.5 playbook floor**, so nothing above is withdrawn. Two details belong on
+the record anyway. The 08-24 17:00 buy_limit reported `risk_reward: 2.0`
+against geometry worth **1.889** - the only material gap between a claimed
+and an actual ratio in the sample, and undetectable at the time because
+nothing recomputed it. And the 08-25 14:59 short sits exactly on the floor,
+clearing 1.5 by 6e-14; it passes on intent rather than on rounding luck only
+because the check carries a tolerance.
+
+Note also that the fix changes the analysis population: a decision with a
+ratio between 1.0 and 1.5 would have validated before and is rejected now,
+so runs produced under the corrected validator are not poolable with this
+one.
+
 Two of these are worth noting even though the grader is refused. The
 08-25 17:29 buy_limit reached +2.39R in its favour before reversing into
 its stop — a −1.00R row that spent most of its life winning. And the

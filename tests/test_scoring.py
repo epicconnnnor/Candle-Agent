@@ -702,3 +702,56 @@ def test_an_analysis_without_enough_forward_bars_is_incomplete_not_zero(fresh):
     assert row["regime_verdict"] is None
     assert row["abstention_outcome"] == "insufficient_data"
     assert run["analyses_incomplete"] == 1
+
+
+# --- prompt contract pooling -------------------------------------------
+
+def test_pooling_refuses_two_prompt_contracts():
+    from candle_agent.services import scorer
+
+    mixed = [{"prompt_fingerprint": "aaaaaaaaaaaaaaaa"},
+             {"prompt_fingerprint": "bbbbbbbbbbbbbbbb"}]
+    with pytest.raises(scoring.ScoringError) as e:
+        scorer._one_contract(mixed)
+    assert "two different" in str(e.value)
+
+
+def test_pooling_allows_one_contract_and_returns_it():
+    from candle_agent.services import scorer
+
+    same = [{"prompt_fingerprint": "aaaaaaaaaaaaaaaa"}] * 3
+    assert scorer._one_contract(same) == "aaaaaaaaaaaaaaaa"
+
+
+def test_rows_predating_fingerprints_still_pool_with_each_other():
+    """All equally unknown is coherent; known mixed with unknown is not."""
+    from candle_agent.services import scorer
+
+    legacy = [{"prompt_fingerprint": None}, {}]
+    assert scorer._one_contract(legacy) is None
+
+    with pytest.raises(scoring.ScoringError):
+        scorer._one_contract([{"prompt_fingerprint": "aaaaaaaaaaaaaaaa"},
+                              {"prompt_fingerprint": None}])
+
+
+def test_an_empty_sample_has_no_contract_to_disagree_about():
+    from candle_agent.services import scorer
+
+    assert scorer._one_contract([]) is None
+
+
+def test_the_fingerprint_ignores_which_route_an_analysis_took():
+    """Hashing only the routed prompt would split a sample by its answers."""
+    from candle_agent import orchestrator
+
+    assert orchestrator.prompt_fingerprint() == orchestrator.prompt_fingerprint()
+    assert len(orchestrator.prompt_fingerprint()) == 16
+
+
+def test_moving_the_validator_gate_changes_the_fingerprint(monkeypatch):
+    from candle_agent import orchestrator
+
+    before = orchestrator.prompt_fingerprint()
+    monkeypatch.setattr(orchestrator, "MIN_RISK_REWARD", 2.0)
+    assert orchestrator.prompt_fingerprint() != before

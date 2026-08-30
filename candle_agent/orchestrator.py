@@ -1,6 +1,7 @@
 """Two-stage analysis: diagnose -> route strategy prompt -> decide.
 Every LLM output is validated against a JSON schema plus consistency
 checks; invalid output triggers a retry with the error fed back."""
+import hashlib
 import json
 import pathlib
 import time
@@ -10,7 +11,8 @@ from jsonschema import validate, ValidationError
 from . import db
 from .features import build_feature_packet
 from .llm import get_llm
-from .schemas import STAGE1_SCHEMA, STAGE2_SCHEMA, consistency_errors
+from .schemas import (MIN_RISK_REWARD, STAGE1_SCHEMA, STAGE2_SCHEMA,
+                      consistency_errors, risk_reward)
 
 PROMPTS = pathlib.Path(__file__).parent / "prompts"
 MAX_RETRIES = 2
@@ -25,6 +27,33 @@ ROUTES = {
 
 def _prompt(name):
     return (PROMPTS / name).read_text()
+
+
+def prompt_fingerprint() -> str:
+    """Identity of the contract an analysis was produced under.
+
+    Covers EVERY prompt in the directory, not just the one this route
+    happened to take, plus both schemas and the validator's own gate. Two
+    consequences, and both are the point:
+
+    - Two analyses from the same code state share a fingerprint whatever
+      regime they diagnosed, so a score run may still pool a `range`
+      verdict with a `bull_trend` one. Hashing only the routed prompt
+      would have split a sample by its own answers.
+    - Editing any prompt, adding a schema field, or moving the
+      risk-reward floor changes it, because each of those changes what
+      the model was asked or what it was held to. A score run that pools
+      across such a change is pooling two different questions, and
+      services/scorer.py refuses it.
+    """
+    h = hashlib.sha256()
+    for path in sorted(PROMPTS.glob("*.txt")):
+        h.update(path.name.encode())
+        h.update(path.read_bytes())
+    for schema in (STAGE1_SCHEMA, STAGE2_SCHEMA):
+        h.update(json.dumps(schema, sort_keys=True).encode())
+    h.update(f"rr_floor={MIN_RISK_REWARD}".encode())
+    return h.hexdigest()[:16]
 
 
 def _strip_fences(text):
@@ -116,6 +145,14 @@ def analyze(symbol: str, min_bars: int = 30, llm=None, on_event=None,
         llm, _prompt(route), stage2_user, STAGE2_SCHEMA, extra_check=consistency_errors
     )
 
+    # The model reports risk_reward as well as the prices, and the two do
+    # not always agree - one of the six trades in score run 6 claimed 2.0 on
+    # geometry worth 1.889. The gate already uses the derived value; store it
+    # too, so the row, the chart and any later reader cannot disagree with
+    # the entry/stop/target sitting beside them. None for no_trade.
+    stage2["risk_reward"] = risk_reward(
+        stage2.get("entry"), stage2.get("stop"), stage2.get("target"))
+
     latency_ms = int((time.time() - t0) * 1000)
     # measured usage, so a replay can be costed from history not guesswork
     usage = [u for u in getattr(llm, "usage", []) if u]
@@ -126,5 +163,6 @@ def analyze(symbol: str, min_bars: int = 30, llm=None, on_event=None,
                        # the same numbers the model was shown
                        price_at=packet["last_close"], atr_at=packet["atr14"],
                        prompt_tokens=prompt_tokens,
-                       completion_tokens=completion_tokens)
+                       completion_tokens=completion_tokens,
+                       prompt_fingerprint=prompt_fingerprint())
     return {"stage1": stage1, "stage2": stage2, "model": llm.model, "latency_ms": latency_ms}
