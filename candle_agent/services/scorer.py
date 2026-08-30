@@ -25,8 +25,12 @@ def run(symbol: str, interval: str, replay_run_id: int | None = None,
     """Score every stored analysis in scope. Returns the run row."""
     symbol = symbol.upper()
     params = scoring.resolve_params(overrides)
-    horizon = int(params["horizon_bars"])
-    reach = horizon + int(params["fill_window_bars"])
+    # Far enough for whichever grader looks furthest: the regime window,
+    # the abstention window, or a trade that fills late and then needs its
+    # full horizon. Deriving this from horizon_bars alone silently starved
+    # the abstention grader once the two horizons were decoupled.
+    reach = (max(int(params["horizon_bars"]), int(params["abstention_horizon_bars"]))
+             + int(params["fill_window_bars"]))
 
     interval_ms = to_ms(interval)
     analyses = db.analyses_for_scoring(symbol, interval, replay_run_id,

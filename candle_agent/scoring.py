@@ -48,11 +48,23 @@ DEFAULTS = {
     # Inherited from paper.PENDING_TTL_BARS so there is one fill TTL in
     # the codebase rather than two that can drift apart.
     "fill_window_bars": paper.PENDING_TTL_BARS,
-    # Read off the stage-2 prompts, not invented here: "risk_reward must
-    # be >= 1.5" and "stop must sit... roughly 1x ATR14 from entry". The
-    # scorer holds the model to the geometry the model was told to use.
-    "target_atr": 1.5,
-    "stop_atr": 1.0,
+    # The abstention grader runs on its own, SHORTER horizon, and the two
+    # are not cross-tabulable - see summarize(), which states both.
+    #
+    # The barriers below are an ATR multiple, and ATR14 on 1m bars is a
+    # BAR-scale quantity. Using it as a WINDOW-scale barrier is a units
+    # error: over 30 bars price routinely travels several multiples of a
+    # single bar's range, so a 1.5/1.0 test fires on 80% of bars (measured:
+    # 0.803 over 390 clean AAPL 1m bars) and cannot tell a good no_trade
+    # from a bad one. The rate scales as sqrt(horizon), so the fix is
+    # either a shorter window or bigger barriers; this is the shorter
+    # window, which stays closer to the geometry the prompt actually
+    # states. 10 bars at 3.0/2.0 measures 0.337. Re-derive with
+    # sweep_baselines() on any new instrument or interval - these numbers
+    # are calibrated to 1m equities, not universal.
+    "abstention_horizon_bars": 10,
+    "target_atr": 3.0,
+    "stop_atr": 2.0,
     # The most arbitrary number in the file. 0.3-0.4 is the conventional
     # "trending" band for the Kaufman efficiency ratio; convention is not
     # derivation. fwd_efficiency is stored raw so this can be swept.
@@ -89,6 +101,8 @@ def resolve_params(overrides: dict | None = None) -> dict:
 
     if int(params["horizon_bars"]) < 1:
         raise ScoringError("horizon_bars must be at least 1")
+    if int(params["abstention_horizon_bars"]) < 1:
+        raise ScoringError("abstention_horizon_bars must be at least 1")
     if float(params["target_atr"]) <= 0 or float(params["stop_atr"]) <= 0:
         raise ScoringError("target_atr and stop_atr must be greater than zero")
     # Raising this above the shared TTL would do nothing - paper.on_bar
@@ -195,8 +209,14 @@ def regime_verdict(claimed: str | None, realized: str | None) -> str | None:
 # --- the barrier test, shared by graders 1 and 2 ------------------------
 
 def barrier_walk(anchor: float, atr: float, bars: list[dict], long: bool,
-                 params: dict) -> tuple[str | None, int | None]:
+                 params: dict, horizon: int | None = None
+                 ) -> tuple[str | None, int | None]:
     """Which barrier is reached first, walking forward bar by bar.
+
+    `horizon` is explicit rather than read from params, because the
+    barrier test runs on the abstention horizon while the regime grader
+    runs on the longer one. Reading a single "the horizon" out of params
+    here is exactly the confusion this signature exists to prevent.
 
     Returns ("target"|"stop"|None, bars_taken). None is a timeout - the
     window ended with neither reached, which is not a win and not a loss.
@@ -209,7 +229,9 @@ def barrier_walk(anchor: float, atr: float, bars: list[dict], long: bool,
     target = anchor + target_move if long else anchor - target_move
     stop = anchor - stop_move if long else anchor + stop_move
 
-    for i, bar in enumerate(bars[:int(params["horizon_bars"])], start=1):
+    if horizon is None:
+        horizon = params["abstention_horizon_bars"]
+    for i, bar in enumerate(bars[:int(horizon)], start=1):
         stop_hit = bar["low"] <= stop if long else bar["high"] >= stop
         target_hit = bar["high"] >= target if long else bar["low"] <= target
         if stop_hit:
@@ -242,8 +264,9 @@ def abstention_outcome(anchor: float, atr: float, bars: list[dict],
         return {"abstention_outcome": "insufficient_data", "missed_direction": None,
                 "miss_aligned": None, "bars_to_payoff": None}
 
-    long_result, long_bars = barrier_walk(anchor, atr, bars, True, params)
-    short_result, short_bars = barrier_walk(anchor, atr, bars, False, params)
+    horizon = int(params["abstention_horizon_bars"])
+    long_result, long_bars = barrier_walk(anchor, atr, bars, True, params, horizon)
+    short_result, short_bars = barrier_walk(anchor, atr, bars, False, params, horizon)
 
     if long_result == "target":
         direction, bars_to = "long", long_bars
@@ -412,8 +435,11 @@ def score_analysis(analysis: dict, forward_bars: list[dict], params: dict,
         anchor_source = "derived"
     atr = analysis.get("atr_at")
 
+    a_horizon = int(params["abstention_horizon_bars"])
     window = forward_bars[:horizon]
-    complete = len(forward_bars) >= horizon and anchor is not None and bool(atr)
+    # both graders must have their full window before a row counts
+    reach = max(horizon, a_horizon)
+    complete = len(forward_bars) >= reach and anchor is not None and bool(atr)
 
     measures = forward_measures(anchor, atr, window) if complete else forward_measures(
         anchor or 0.0, 0.0, [])
@@ -435,7 +461,8 @@ def score_analysis(analysis: dict, forward_bars: list[dict], params: dict,
                       if decision == "no_trade" else "not_applicable"}
     elif decision == "no_trade":
         trade = {"trade_outcome": "not_applicable"}
-        abstention = abstention_outcome(anchor, atr, window, claimed, params)
+        abstention = abstention_outcome(
+            anchor, atr, forward_bars[:a_horizon], claimed, params)
     else:
         trade = trade_outcome(analysis["symbol"], stage2, analysis["ts"], atr,
                               forward_bars, params)
@@ -490,38 +517,47 @@ def baselines(bars: list[dict], params: dict, interval_ms: int | None = None) ->
     pay and the model's no_trade bars pay 40% of the time, its abstention
     carries no information. Costs nothing: pure arithmetic, no LLM.
     """
-    horizon = int(params["horizon_bars"])
+    horizon = int(params["horizon_bars"])                    # regime grader
+    a_horizon = int(params["abstention_horizon_bars"])        # barrier test
+    reach = max(horizon, a_horizon)
     atrs = atr_series(bars, 14)
     payable = long_paid = short_paid = 0
-    tested = skipped = 0
+    tested = regime_tested = skipped = 0
     regimes: dict[str, int] = {}
 
     for i, bar in enumerate(bars):
-        forward = contiguous_prefix(bars[i + 1:i + 1 + horizon], interval_ms)
-        if len(forward) < horizon:
-            # either the series ran out or a gap cut the window short
-            if len(bars) - (i + 1) >= horizon:
-                skipped += 1
-            continue
         if not atrs[i] or atrs[i] <= 0:
             continue
-        tested += 1
+        forward = contiguous_prefix(bars[i + 1:i + 1 + reach], interval_ms)
+        if len(forward) < reach and len(bars) - (i + 1) >= reach:
+            skipped += 1                    # a gap cut it short, not the series end
         anchor, atr = bar["close"], atrs[i]
 
-        if barrier_walk(anchor, atr, forward, True, params)[0] == "target":
-            payable += 1
-            long_paid += 1
-        elif barrier_walk(anchor, atr, forward, False, params)[0] == "target":
-            payable += 1
-            short_paid += 1
+        # each grader is counted only where ITS OWN window is complete, so
+        # the two denominators below are not interchangeable
+        if len(forward) >= a_horizon:
+            tested += 1
+            if barrier_walk(anchor, atr, forward, True, params, a_horizon)[0] == "target":
+                payable += 1
+                long_paid += 1
+            elif barrier_walk(anchor, atr, forward, False, params, a_horizon)[0] == "target":
+                payable += 1
+                short_paid += 1
 
-        realized = classify_regime(forward_measures(anchor, atr, forward), params)
-        if realized:
-            regimes[realized] = regimes.get(realized, 0) + 1
+        if len(forward) >= horizon:
+            regime_tested += 1
+            realized = classify_regime(
+                forward_measures(anchor, atr, forward[:horizon]), params)
+            if realized:
+                regimes[realized] = regimes.get(realized, 0) + 1
 
-    majority = max(regimes.values()) / tested if tested and regimes else None
+    majority = max(regimes.values()) / regime_tested if regime_tested and regimes else None
     return {
+        "horizon_bars": horizon,
+        "abstention_horizon_bars": a_horizon,
+        # the barrier test's denominator; the regime one is separate below
         "bars_tested": tested,
+        "regime_bars_tested": regime_tested,
         # windows that had enough bars but were cut short by a gap; a
         # large number here means the series is not one continuous session
         "windows_skipped_for_gaps": skipped,
@@ -571,8 +607,8 @@ def sweep_baselines(bars: list[dict], interval_ms: int | None,
                     continue
                 tested += 1
                 anchor, atr = bar["close"], atrs[i]
-                if (barrier_walk(anchor, atr, forward, True, params)[0] == "target"
-                        or barrier_walk(anchor, atr, forward, False, params)[0] == "target"):
+                if (barrier_walk(anchor, atr, forward, True, params, horizon)[0] == "target"
+                        or barrier_walk(anchor, atr, forward, False, params, horizon)[0] == "target"):
                     paid += 1
             out.append({
                 "horizon_bars": horizon,
@@ -648,10 +684,16 @@ def summarize(rows: list[dict], params: dict, interval_ms: int,
     """Counts, each one carrying how many independent windows produced it,
     and a plain sentence when a number cannot support a claim."""
     horizon = int(params["horizon_bars"])
+    a_horizon = int(params["abstention_horizon_bars"])
     scored = [r for r in rows if r["complete"]]
 
-    def windows(subset):
-        return independent_windows([r["bar_ts"] for r in subset], horizon, interval_ms)
+    # Independence is a property of the WINDOW, so each grader is counted
+    # at its own horizon. A 10-bar window frees up sooner than a 30-bar
+    # one, and 25 consecutive decisions are worth more observations to the
+    # abstention grader than to the regime grader for exactly that reason.
+    def windows(subset, h=None):
+        return independent_windows([r["bar_ts"] for r in subset],
+                                   horizon if h is None else h, interval_ms)
 
     trades = [r for r in scored if r["trade_outcome"] in ("target", "stop")]
     resolved = _counts(scored, "trade_outcome")
@@ -686,7 +728,20 @@ def summarize(rows: list[dict], params: dict, interval_ms: int,
         "analyses": len(rows),
         "scored": len(scored),
         "incomplete": len(rows) - len(scored),
+        # Two horizons, stated here and again on every section that uses
+        # one. The graders were decoupled because ATR14 is a bar-scale
+        # unit and a 30-bar barrier test built on it fires on 80% of bars.
+        # The cost is that abstention and regime results are NOT
+        # cross-tabulable: they describe different windows over the same
+        # decision, and a row that is a "miss" at 10 bars and a "range" at
+        # 30 is not a contradiction.
         "horizon_bars": horizon,
+        "abstention_horizon_bars": a_horizon,
+        "horizons_note": (
+            f"regime and trade are scored over {horizon} bars, abstention over "
+            f"{a_horizon}. Do not cross-tabulate them: they are different "
+            "windows on the same decision."),
+        # reported at the longer horizon, which is the conservative read
         "independent_windows": windows(scored),
         "baselines": base or {},
         "trade": {
@@ -695,6 +750,7 @@ def summarize(rows: list[dict], params: dict, interval_ms: int,
             "win_rate": round(wins / len(trades), 4) if trades else None,
             "total_r": round(sum(r["r_multiple"] or 0 for r in trades), 3),
             "same_bar_ambiguous": sum(r["same_bar_ambiguous"] or 0 for r in scored),
+            "horizon_bars": horizon,
             **_verdict("trade_win_rate", len(trades), windows(trades),
                        "a win rate or an expectancy"),
         },
@@ -705,7 +761,10 @@ def summarize(rows: list[dict], params: dict, interval_ms: int,
             "lift": lift,
             "aligned_misses": len(aligned),
             "aligned_misses_at_level": len([r for r in aligned if r in at_level]),
-            **_verdict("abstention_lift", len(abstentions), windows(abstentions),
+            "horizon_bars": a_horizon,
+            "barriers_atr": f'{params["target_atr"]}/{params["stop_atr"]}',
+            **_verdict("abstention_lift", len(abstentions),
+                       windows(abstentions, a_horizon),
                        "an abstention lift over the base rate"),
         },
         "regime": {
@@ -724,6 +783,7 @@ def summarize(rows: list[dict], params: dict, interval_ms: int,
             # how unusual this window was, not a baseline for the accuracy.
             "table_wide_majority_rate": (base or {}).get("majority_regime_rate"),
             "table_wide_majority_regime": (base or {}).get("majority_regime"),
+            "horizon_bars": horizon,
             **_verdict("regime_accuracy", len(regimes), windows(regimes),
                        "a regime accuracy against the majority-class baseline"),
         },

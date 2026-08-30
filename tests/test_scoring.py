@@ -55,7 +55,13 @@ def climb(n, start=100.0, step=0.4, start_ts=START_TS):
     return series(hlc, start_ts, open0=start)
 
 
-P = scoring.resolve_params({"horizon_bars": 5, "fill_window_bars": 3})
+# Explicit about every parameter it depends on, including the barriers.
+# These tests exercise the MECHANISM; the production calibration is a
+# separate decision and is pinned on its own below, so re-calibrating
+# cannot silently rewrite what the mechanism tests mean.
+P = scoring.resolve_params({"horizon_bars": 5, "fill_window_bars": 3,
+                            "abstention_horizon_bars": 5,
+                            "target_atr": 1.5, "stop_atr": 1.0})
 
 
 def analysis(regime="range", decision="no_trade", price=100.0, atr=1.0,
@@ -214,6 +220,81 @@ def test_a_narrow_drift_is_chop():
 def test_the_confusion_matrix_collapses_by_what_the_error_costs(
         claimed, realized, expected):
     assert scoring.regime_verdict(claimed, realized) == expected
+
+
+# --- the two horizons are decoupled, and said so out loud ----------------
+
+def test_the_production_calibration_is_what_was_chosen():
+    """Pinned deliberately. These are not arbitrary defaults, they are a
+    measured choice: 1.5/1.0 over 30 bars fires on 0.803 of clean AAPL 1m
+    bars and cannot discriminate; 3.0/2.0 over 10 measures 0.337. Changing
+    them is a decision, so it should break a test."""
+    assert scoring.DEFAULTS["horizon_bars"] == 30
+    assert scoring.DEFAULTS["abstention_horizon_bars"] == 10
+    assert scoring.DEFAULTS["target_atr"] == 3.0
+    assert scoring.DEFAULTS["stop_atr"] == 2.0
+    assert scoring.DEFAULTS["target_atr"] / scoring.DEFAULTS["stop_atr"] == 1.5
+
+
+def test_the_abstention_grader_walks_its_own_horizon_not_the_regime_one():
+    """A move that pays only after bar 5 is not a miss on a 5-bar
+    abstention window, however long the regime window is."""
+    late = flat(5) + climb(6, start=100.0, step=1.0,
+                           start_ts=START_TS + 5 * STEP_MS)
+    params = scoring.resolve_params({"horizon_bars": 30,
+                                     "abstention_horizon_bars": 5,
+                                     "target_atr": 1.5, "stop_atr": 1.0})
+    short = scoring.abstention_outcome(100.0, 1.0, late, "range", params)
+    assert short["abstention_outcome"] == "correct"
+
+    params_long = {**params, "abstention_horizon_bars": 11}
+    long = scoring.abstention_outcome(100.0, 1.0, late, "range", params_long)
+    assert long["abstention_outcome"] == "miss_long"
+
+
+def test_the_summary_states_both_horizons_so_no_one_cross_tabulates():
+    rows = scored_rows(n=6, stride=10)
+    summary = scoring.summarize(rows, P, STEP_MS, None)
+
+    assert summary["horizon_bars"] == P["horizon_bars"]
+    assert summary["abstention_horizon_bars"] == P["abstention_horizon_bars"]
+    assert "Do not cross-tabulate" in summary["horizons_note"]
+    # and each section carries the horizon it was actually scored over
+    assert summary["regime"]["horizon_bars"] == P["horizon_bars"]
+    assert summary["trade"]["horizon_bars"] == P["horizon_bars"]
+    assert summary["abstention"]["horizon_bars"] == P["abstention_horizon_bars"]
+    assert summary["abstention"]["barriers_atr"] == "1.5/1.0"
+
+
+def test_independence_is_counted_at_each_graders_own_horizon():
+    """A 10-bar window frees up sooner than a 30-bar one, so the same 25
+    decisions are worth more observations to the abstention grader."""
+    params = scoring.resolve_params({"horizon_bars": 30,
+                                     "abstention_horizon_bars": 10,
+                                     "fill_window_bars": 3})
+    rows = []
+    for i in range(25):
+        ts = START_TS + i * STEP_MS
+        rows.append(scoring.score_analysis(
+            analysis(ts=ts), climb(40, step=0.4, start_ts=ts), params))
+    summary = scoring.summarize(rows, params, STEP_MS, None)
+
+    assert summary["regime"]["independent_windows"] == 1
+    assert summary["abstention"]["independent_windows"] == 3
+
+
+def test_the_abstention_horizon_is_stored_with_the_other_parameters(fresh):
+    store()
+    run = scorer.run(SYMBOL, "1m", overrides={"abstention_horizon_bars": 7})
+    assert json.loads(run["params_json"])["abstention_horizon_bars"] == 7
+    assert run["params"]["abstention_horizon_bars"] == 7
+    assert json.loads(run["summary_json"])["abstention_horizon_bars"] == 7
+
+
+def test_an_abstention_horizon_below_one_is_refused():
+    with pytest.raises(scoring.ScoringError) as e:
+        scoring.resolve_params({"abstention_horizon_bars": 0})
+    assert "abstention_horizon_bars" in str(e.value)
 
 
 # --- excursions: the invariant that actually holds -----------------------

@@ -2,9 +2,12 @@
 
 For every analysis in a replay run: what actually happened next?
 
-Three graders read the same forward window. They exist separately because
-their sample sizes differ by an order of magnitude — 25 analyses of which
-23 are `no_trade` give you 2 trade outcomes but 25 regime verdicts.
+Three graders walk forward from the same decision bar. They exist
+separately because their sample sizes differ by an order of magnitude —
+25 analyses of which 23 are `no_trade` give you 2 trade outcomes but 25
+regime verdicts — and they no longer share a window: abstention is scored
+over 10 bars, regime and trade over 30. See **Horizon** for why, and for
+why their results must not be cross-tabulated.
 
 | grader | question | rows per 25 analyses |
 | --- | --- | --- |
@@ -83,8 +86,67 @@ the vacuity guard: "the model sees everything" would satisfy the first.
 
 ## Horizon
 
-`horizon_bars = 30`. One number, so the three graders cross-tabulate on
-the same window.
+**Two horizons, not one.** `horizon_bars = 30` for the regime and trade
+graders; `abstention_horizon_bars = 10` at `3.0/2.0` ATR barriers for the
+abstention grader. The original design used one number for all three so
+they would cross-tabulate on the same window. Measurement killed that;
+the reasoning is below, and it is a units error, not a tuning preference.
+
+### Why the abstention grader was decoupled
+
+The abstention benchmark is an ATR multiple, and **ATR14 on 1m bars is a
+bar-scale quantity**. Using it as a window-scale barrier is a category
+error: over 30 bars price routinely travels several multiples of a single
+bar's range, so the 1.5/1.0 test the prompts imply fires almost always.
+
+Measured with `sweep_baselines()` over 390 clean AAPL 1m bars — the real
+Alpaca segment containing replay run 1:
+
+```
+  horizon |  1.5/1.0   2.2/1.5   3.0/2.0   3.8/2.5   4.5/3.0   6.0/4.0
+    5 bars |   0.610    0.353     0.179     0.086     0.039     0.008
+   10 bars |   0.758    0.537     0.337     0.203     0.126     0.058
+   15 bars |   0.781    0.675     0.464     0.304     0.229     0.104
+   20 bars |   0.803    0.722     0.546     0.427     0.308     0.132
+   30 bars |   0.803    0.778     0.650     0.539     0.439     0.194
+   45 bars |   0.800    0.774     0.670     0.586     0.507     0.278
+   60 bars |   0.800    0.791     0.706     0.624     0.558     0.394
+```
+
+At the original defaults — 30 bars, 1.5/1.0 — **0.803 of all bars pay**. A
+test that fires four times in five cannot tell a good `no_trade` from a
+bad one, so the miss rate and the lift were uninterpretable regardless of
+sample size. Note the whole `1.5/1.0` column: there is no horizon at
+which the strategy's own stated geometry discriminates.
+
+That is a finding about the prompt, not only the scorer. A stop of
+"roughly 1x ATR14" on 1m bars is a five-minute proposition, which is
+exactly why both of run 1's entries stopped at −1.0R.
+
+The rate scales as `sqrt(horizon)` — holding it fixed from 5 to 30 bars
+needs barriers of about √6 ≈ 2.45×, which the table bears out. So the fix
+is either a shorter window or bigger barriers. **10 bars at 3.0/2.0
+(0.337)** was chosen over 30 bars at ~3.5× scale because it stays closer
+to the geometry the prompt actually states: scoring a 1-ATR-stop strategy
+against a 3.5-ATR benchmark stop would mean a "miss" was no longer a
+trade the playbook would ever have allowed.
+
+These numbers are calibrated to 1m equities. Re-derive them with
+`sweep_baselines()` for any new instrument or interval — nothing about
+them is universal.
+
+### The cost, stated where it will be read
+
+The two graders no longer describe the same window, so **their results
+are not cross-tabulable**. A row that is a `miss` at 10 bars and a `range`
+at 30 is not a contradiction. `summarize()` therefore reports
+`horizon_bars` and `abstention_horizon_bars` at the top level, repeats
+the relevant one on every section, and carries a `horizons_note` saying
+so in words. Independence is counted at each grader's own horizon too — a
+10-bar window frees up sooner, so 25 consecutive decisions are worth 3
+independent windows to the abstention grader and 1 to the regime grader.
+
+### Why 30 for the regime and trade graders
 
 It is the only non-invented number available: `MIN_BARS = 30`, and
 `build_feature_packet(n_recent=30)` shows the model 30 bars. A verdict
@@ -148,14 +210,18 @@ No counterfactual trade is constructed. Inventing one means inventing a
 direction, a level and a stop — three arbitrary choices stacked. Instead:
 **did a payable move exist at all?**
 
-Anchored at `price_at`, in `atr_at` units, over the horizon:
+Anchored at `price_at`, in `atr_at` units, over
+`abstention_horizon_bars` (10):
 
-- long side: did price reach **+1.5 ATR** before **−1.0 ATR**?
-- short side: did it reach **−1.5 ATR** before **+1.0 ATR**?
+- long side: did price reach **+3.0 ATR** before **−2.0 ATR**?
+- short side: did it reach **−3.0 ATR** before **+2.0 ATR**?
 
-The 1.5 and 1.0 are read off the stage-2 prompts (`risk_reward must be
->= 1.5`, stop "roughly 1x ATR14 from entry"), so the scorer holds the
-model to the geometry the model was told to use.
+The 1.5 reward:risk comes off the stage-2 prompts (`risk_reward must be
+>= 1.5`, stop "roughly 1x ATR14 from entry"). The absolute size does not:
+at the prompt's literal 1.5/1.0 the test fires on 80% of bars and cannot
+discriminate. The barriers are scaled as a unit, so the ratio the model
+was told to use is preserved and only the size changes — see **Horizon**
+for the measurement and the units error behind it.
 
 The two sides are mutually exclusive by construction — reaching +1.5
 means passing +1.0 first, which stops the short side out — so the outcome
@@ -333,6 +399,7 @@ scorer is only useful if you know which way its thumb rests.
 | 3 | `trend_displacement_atr = 1.5`, borrowed from the RR gate, which is about trade geometry not regime | neutral |
 | 4 | `range_envelope_atr = 2.5` = target + stop, which assumes entry exactly at an extreme | neutral |
 | 5 | Benchmark anchored at the decision close, not a pullback — easier than any real order | **against the model** |
+| 5b | Barrier size `3.0/2.0` over a 10-bar abstention window, chosen off a measured sweep to land near a 0.34 base rate. The 1.5 RR is the prompt's; the scale is not, and it is calibrated to 1m equities only | **unresolved** |
 | 6 | ATR frozen at decision time: comparable, but stale if volatility shifts mid-window | neutral |
 | 7 | Pessimistic same-bar rule, inherited | **against the model** |
 | 8 | `fill_window_bars = 20`, inherited from `PENDING_TTL_BARS`, never independently justified | inherited |
