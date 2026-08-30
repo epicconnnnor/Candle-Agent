@@ -5,6 +5,7 @@ import OhlcStrip from "./components/OhlcStrip";
 import Chart, { type ChartHandle } from "./components/Chart";
 import Stage1Panel from "./components/Stage1Panel";
 import DecisionCard from "./components/DecisionCard";
+import DecisionPathCard from "./components/DecisionPathCard";
 import ReasoningCard from "./components/ReasoningCard";
 import SessionCard from "./components/SessionCard";
 import LevelsCard from "./components/LevelsCard";
@@ -325,6 +326,7 @@ export default function App() {
               stage2={feed.analysis?.stage2 ?? null}
               freshness={freshness}
             />
+            <DecisionPathCard stage2={feed.analysis?.stage2 ?? null} />
             <ReasoningCard stage2={feed.analysis?.stage2 ?? null} />
           </div>
 
