@@ -2,225 +2,158 @@
 
 # Candle Agent
 
+📈 I wanted to know whether an LLM can actually read a chart. Not whether it can *sound* like it can — whether it can.
 
+So I built two things. A system that streams live market data, asks an LLM what it sees, and shows you the answer. And a harness that grades every one of those answers against what the market did next.
+
+The second part is the interesting one. It told me the model doesn't work.
+
+**It does not connect to a broker and it does not place orders.** It tells you what it sees, and I check whether it was right.
 
 ---
 
-A distributed market analysis system. It streams live candle data, runs a two-stage LLM analysis over it, and pushes results to your browser in real time.
+## What it does
 
-It does **not** connect to a broker and it does **not** place orders. It tells you what it sees.
-
----
-
-## Features
-
-- 📈 **Live candle ingest** — streams OHLCV from Alpaca (stocks + crypto) or Binance
-- 🌐 **Pluggable sources** — crypto and US equities behind one `DataSource` interface
-- ⏱️ **Selectable timeframe** — 1m, 5m, 15m, 1h, 4h, 1d
-- 🧠 **Two-stage AI analysis** — market diagnosis, then trade decision (limit / breakout / market / no-trade)
-- 🛡️ **Validation layer** — JSON schema checks, semantic consistency, truncation repair, auto-retry
-- 📡 **Real-time push** — Server-Sent Events, no polling
-- 📊 **Trading terminal UI** — candlestick chart with entry, stop, and target drawn on it
-- 🔀 **Service isolation** — ingest, analysis, and streaming run independently over NATS
-- 📉 **Metrics** — Prometheus on every service
-- ☁️ **Cloud-native** — Terraform-provisioned AWS ECS Fargate deployment
+- 📈 **Streams live candles** from Alpaca (US stocks + crypto) or Binance
+- 🧠 **Two-stage analysis** — first describe the market, then decide what to do about it
+- 🛡️ **Checks the model's work** — schema, geometry, and consistency, with retries
+- 📡 **Pushes results live** to your browser over SSE
+- 📊 **Draws it on the chart** — entry, stop, target, and key levels
+- ⏪ **Replays history** through the same pipeline, one bar at a time
+- 🎯 **Scores every call** against what actually happened next
+- 🚫 **Refuses to report numbers** the sample can't support
+- 🔑 **Bring your own API key** — yours, not mine, and it never touches my server
+- 🔀 **Runs as separate services** over NATS, so a slow model can't block data
+- 📉 **Prometheus metrics** on everything
 
 ---
 
 ## Why two stages
 
-I tried a single prompt first. The model would jump straight to "buy here" without establishing what kind of market it was looking at, and the answers were unstable.
+I tried one prompt first. The model would jump straight to "buy here" without ever saying what kind of market it was looking at, and the answers were all over the place.
 
-So I split it:
+So I split it in half.
 
-**Stage 1** describes the market only. Cycle phase, trend structure, key levels, confidence. No trade talk allowed.
+**Stage 1 only describes.** What's the regime, where are the levels, is the range expanding or contracting. No trade talk allowed.
 
-**Stage 2** reads that diagnosis and decides what to do. Entry, stop, target, reason. Or no trade — which happens often and is a valid answer.
+**Stage 2 reads that description and decides.** Entry, stop, target, and why. Or no trade — which is a real answer and happens a lot.
 
-Stage 2 can't invent a setup that contradicts Stage 1, because Stage 1 already committed to a description. That one change did more for output quality than any prompt tuning.
+The point is that stage 2 inherits stage 1 as a commitment, not a suggestion. It can't invent a long setup after stage 1 said bearish, because the playbook it gets routed to won't allow it. That one change did more for output quality than any prompt tuning I tried.
 
 ---
 
-## Architecture
+## Does it work?
+
+Most projects like this can't answer that. This one can, which is the
+part I'd point at.
+
+I replay historical bars through the live pipeline one at a time, with
+the analyzer unable to tell replay from live. It never sees a bar from
+the future — enforced in the query, and tested with a check that
+deliberately breaks the guard to confirm the test would notice.
+
+Then every analysis is graded against the next 30 bars.
+
+**On what I've measured so far** — AAPL 1m, three sessions,
+deepseek-chat:
+
+| | Model | A predictor that ignores the chart |
+|---|---|---|
+| Regime accuracy | 0.500 | 0.833 |
+| Cycle accuracy | 0.375 | 0.750 |
+
+The model doesn't beat the trivial baseline here. One pattern showed up
+in both runs: it claimed a trend 16 times across two samples sharing no
+bars, and none of them realized. That's worth chasing — it points at the
+prompt rather than the pipeline.
+
+This is a small sample on one instrument at one timeframe, and the
+harness says so rather than letting me round it up. The trade grader
+needs ~100 resolved trades and has 4, so it refuses to report at all.
+
+Full numbers and caveats: [`docs/results.md`](docs/results.md)
+---
+
+## Why the harness refuses to answer
+
+This is the part I'd want you to look at.
+
+25 analyses on consecutive bars, each graded over the next 30 bars, share 29 of every 30 bars with their neighbour. That's one observation, not 25. Row count is not sample size.
+
+So the scorer counts how many forward windows are actually disjoint, and when there aren't enough it says so instead of printing a number:
 
 ```
-data source ──▶ ingest ──▶ NATS JetStream ──▶ analysis ──▶ SSE ──▶ browser
-                                │                 │
-                                ▼                 ▼
-                             SQLite          Prometheus
+Cannot support a regime accuracy against the majority-class baseline:
+25 rows, but only 1 independent window (5 needed). Overlapping forward
+windows inflate the row count without adding information — raise the
+replay stride.
 ```
 
-This started as one script. I broke it apart because a slow LLM call was blocking data ingestion, and I wanted to restart the analysis service without dropping candles.
+The fix was to space the decision bars out. Same token cost, real observations.
 
-Full design notes: [`docs/architecture.md`](docs/architecture.md)
+Every threshold is stored with the score, so any of them can be re-swept later without spending a cent. And the cycle threshold was swept on MSFT and then used to grade AAPL — chosen before the data it scores, not after.
+
+Design reasoning: [`docs/scoring-design.md`](docs/scoring-design.md)
+
+---
+
+## How it's put together
+
+```
+data source ─▶ ingest ─▶ NATS ─▶ analyzer ─▶ SSE ─▶ browser
+                          │          │
+                       replay      SQLite
+```
+
+This was one script at first. I broke it up because a 5-second LLM call was blocking data ingestion, and I wanted to restart the analyzer without dropping candles.
+
+Now each piece runs in its own container and talks only over NATS.
+
+Design notes and the bugs worth reading about: [`docs/architecture.md`](docs/architecture.md)
 
 ---
 
 ## Data sources
 
-Every venue sits behind `DataSource` (`candle_agent/sources/base.py`), so
-ingest only ever sees a `SymbolInfo` and a stream of `Bar` dicts.
-
-| Source | Assets | Credentials | Stream intervals | History |
-|---|---|---|---|---|
-| `alpaca` **(default)** | US equities + crypto | `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` | 1m native, longer rolled up locally | native, all six |
-| `binance` | crypto (USDT/USDC pairs) | none | all six, native | native, all six |
-| `demo` | synthetic | none | all six (`INGEST_MODE=demo`) | synthetic |
-
-**Alpaca is the default** (`DEFAULT_SOURCE=alpaca`, default symbol `AAPL`).
-Binance stays registered and `BTCUSDT` still works through it — but it
-answers **HTTP 451** from US IPs, AWS included, so it cannot be the
-default path. That 451 surfaces as a `region_blocked` status event rather
-than a silent reconnect loop.
-
-The registry is built from whichever credentials are present. With no
-Alpaca keys it registers Binance alone and says so at startup — not a
-crash.
-
-### Alpaca hosts
-
-Two different hosts, and mixing them up costs an afternoon:
-
-| Variable | Purpose | Default |
+| Source | What you get | Keys needed |
 |---|---|---|
-| `ALPACA_BASE_URL` | trading — assets, clock | `https://paper-api.alpaca.markets` |
-| `ALPACA_DATA_URL` | market data — bars | `https://data.alpaca.markets` |
+| `alpaca` **(default)** | US stocks + crypto, 13k symbols | `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` |
+| `binance` | Crypto pairs | none |
+| `demo` | Synthetic bars for offline work | none |
 
-Neither may end in a version path. The code appends `/v2` (or
-`/v1beta3`) itself, so a URL ending in `/v2` becomes `/v2/v2/assets` and
-returns 404 — which reads as "endpoint gone" rather than "config wrong".
-**Startup refuses such a URL with an explicit error.** Note also that
-paper keys are rejected by the live trading host: paper keys go with
-`paper-api.alpaca.markets`.
+**Binance can't be the default.** It returns HTTP 451 from US IP addresses, AWS included. That shows up as a `region_blocked` message in the UI rather than a silent hang.
 
-### History limits on the free plan
+**Two Alpaca hosts, and mixing them up costs an afternoon.** `ALPACA_BASE_URL` is for trading endpoints, `ALPACA_DATA_URL` is for bars. Neither may end in `/v2` — the code adds that, so a versioned URL becomes `/v2/v2/assets` and 404s. Startup rejects it with an explicit message now.
 
-`/subscribe` asks for 200 bars at the requested interval. Alpaca's free
-IEX plan caps how far intraday history goes back — measured, not guessed:
+**Free-plan history is capped.** 1m through 1h give you the full 200 bars; 4h gives about 60 because equity intraday stops around 35 days back. Short backfills say so in the UI.
 
-| Interval | AAPL bars returned |
-|---|---|
-| 1m, 5m, 15m, 1h | 200 (full) |
-| 4h | ~60 — equity intraday history stops around 35 days back |
-| 1d | 200 (full) |
-
-Crypto intraday is capped tighter, around 7 days (`BTC/USD` 1h returns
-~168). Widening the request window does not help; it is a plan limit. A
-short backfill is reported as a `backfilled` status event with
-`partial: true`, so a stubby chart explains itself.
-
-Adding a venue means one file implementing four methods, plus a line in
-`sources/__init__.py`.
-
-### Connection status
-
-Ingest publishes what the feed is doing on `ingest.status.<SYMBOL>`,
-forwarded to the browser over SSE. Silence is never left unexplained:
-
-| State | Meaning |
-|---|---|
-| `connected` / `streaming` | socket open; bars flowing |
-| `market_closed` | equity outside market hours, with `next_open` — history is still returned |
-| `stalled` | no bar for 2× the interval **while the clock says the market is open** |
-| `unhealthy` | N consecutive failed reconnects, with the attempt count |
-| `region_blocked` | Binance 451 |
-| `backfill_failed` | history fetch failed; the live stream continues |
-
-`market_closed` and `stalled` are distinguished by Alpaca's clock
-endpoint, not guessed from the absence of data.
-
----
-
-## API
-
-| Route | What it does |
-|---|---|
-| `GET /symbols` | Tradable symbols merged across sources, cached 24h. Filter with `?source=` / `?asset_class=`. `unavailable` names any source that failed. |
-| `POST /subscribe` | `{symbol, interval, source?}` — repoints ingest, backfills 200 real historical bars at the requested interval, and returns them so the chart renders immediately. Idempotent: the same arguments twice is a no-op, not a second socket. Unknown symbol → 400. |
-| `GET /api/bars/{symbol}` | Stored bars. |
-| `GET /api/analysis/{symbol}` | Latest two-stage analysis. |
-| `POST /api/analyze/{symbol}` | Queue an analysis (202; result arrives over SSE). |
-| `GET /api/paper/{symbol}` | Paper position, history, stats. |
-| `GET /api/events` | SSE: bars, analyses, paper updates, and ingest connection status. |
-
-`source` is optional on `/subscribe` — it is inferred from the symbol's
-entry in the cached catalogue.
+Real bars and demo bars are marked at the row level, and every read filters to real data by default. I learned that one the hard way, twice.
 
 ---
 
 ## Bring your own key
 
-Visitors can run analyses on their own LLM credentials instead of the
-server's. The security model is the whole feature; everything else is
-plumbing.
+You can run analyses on your own LLM credentials.
 
-- The key lives in **React state only**. Not localStorage, not
-  sessionStorage, not a cookie, not a database, not disk. A reload clears
-  it. There is no "remember my key", by design.
-- It travels in an **`X-LLM-Key` header**, never a URL or query string —
-  URLs end up in browser history, proxy logs and access logs.
-- The backend uses it for **one upstream call** and discards it. It is
-  never written to a log, an error message, a trace, or a stored record.
-- Provider error bodies are **not forwarded** on an auth failure. They
-  echo the key back — DeepSeek returns a masked `****ghij` tail that no
-  scrubbing regex can recognise — so the body is dropped and replaced with
-  a fixed message.
-- The header is **refused over plain HTTP** unless the host is loopback
-  (for local development) or `ALLOW_INSECURE_KEY_HEADER=true`.
+- The key stays in your browser. By default it's in memory only and a reload clears it.
+- You can tick a box to save it in this browser. It then survives a reload and is readable by anyone with access to your machine — the panel says so plainly.
+- Either way it **never gets stored on my server**. It rides one request header, gets used for one call, and is discarded.
+- It never reaches the message bus, because JetStream writes messages to disk.
+- Provider error bodies are dropped on auth failures, because they echo your key back.
 
-A visitor key makes the analysis run **inline in the api process**, not
-over the bus. That is deliberate: JetStream persists messages to disk, so
-putting a key on a request subject would write it down.
-
-`tests/test_byok_security.py` asserts the key never appears in stdout,
-stderr, the response body, any database row, or any bus message after a
-real analysis — driving the actual client code, with only the outbound
-HTTP call intercepted.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `RATE_LIMIT_PER_HOUR` | `60` | Per-IP cap on analyze. `0` disables. |
-| `TRUST_PROXY_HEADERS` | `false` | Honour `X-Forwarded-For`. Only behind a proxy that rewrites it — it is otherwise trivially spoofed. |
-| `ALLOW_INSECURE_KEY_HEADER` | `false` | Accept a key over plain HTTP. Never in production. |
-
-Rate limiting applies **by IP regardless of whose key is used** — a
-visitor's key protects their wallet, not this server's CPU. The counter is
-in-memory and therefore per replica.
-
----
-
-## Terminal
-
-The terminal reads live data only — there is no mock mode. On open it
-fetches `/symbols`, subscribes to the last symbol you picked, draws the
-returned history, and then follows `/api/events`.
-
-- **Symbol picker** — searchable combobox over every symbol the sources
-  report (13k+ with Alpaca), matching on ticker or company name, grouped
-  by asset class with your last five picks pinned on top.
-- **Live updates** — the newest candle goes in via `series.update()`, so a
-  tick never re-sets the whole series.
-- **Status is visible** — every `ingest.status` event is rendered: a muted
-  banner with the next open when the market is closed, a note when the
-  backfill came back short, and a bear-coloured bar for `region_blocked`,
-  `unknown_symbol` or repeated reconnect failures. An empty chart is never
-  left unexplained.
-- **Connection state** — `connected` / `reconnecting` / `disconnected` sits
-  in the top bar; the SSE stream reconnects on its own with jittered
-  exponential backoff.
-- **Switching symbols** dims the old chart rather than blanking it.
+There's a test that runs a real analysis and asserts the key appears in no log, no response, no database row and no bus message.
 
 ---
 
 ## Requirements
 
-| Item | Requirement |
+| | |
 |---|---|
-| OS | Linux, macOS, Windows (Docker) |
+| OS | Linux, macOS, Windows (via Docker) |
 | Docker | Compose v2 |
 | Python | 3.11+ (local dev only) |
-| Node | 20+ (trading terminal only) |
-| Network | Access to your configured LLM API |
+| Node | 20+ (terminal only) |
+| Network | Access to your LLM provider |
 
 ---
 
@@ -229,39 +162,47 @@ returned history, and then follows `/api/events`.
 ```bash
 git clone https://github.com/epicconnnnor/Candle-Agent.git
 cd Candle-Agent
-cp .env.example .env     # add your API key
-docker compose up
+cp .env.example .env     # add your keys
+docker compose up -d --build
 ```
 
-Trading terminal:
+Then the terminal:
 
 ```bash
 cd terminal
-cp .env.example .env      # optional; defaults to http://localhost:8000
 npm install
 npm run dev
 ```
 
 Open http://localhost:5174
 
-The terminal talks to the api over `VITE_API_URL` (default
-`http://localhost:8000`). Because it runs on its own origin, the api must
-allow it — that is what `CORS_ORIGINS` is for, and the default already
-covers the dev and preview servers.
+Two things that will save you time:
+
+`docker compose restart` does **not** pick up an edited `.env`. Use `up -d`.
+
+`docker compose up -d` does **not** rebuild images after a code change. Use `up -d --build`.
 
 ---
 
-## Deployment
+## Running a replay
 
-Infrastructure is defined in Terraform under [`infra/`](infra/) — VPC, ECS Fargate, ALB, ECR, Secrets Manager.
+Price it before you spend anything:
 
 ```bash
-cd infra
-terraform init
-terraform apply
+curl -X POST localhost:8000/api/replay \
+  -H 'content-type: application/json' \
+  -d '{"symbol":"AAPL","interval":"1m","stride":30,"max_analyses":12,"dry_run":true}'
 ```
 
-The trading terminal (`terminal/`) deploys to Cloudflare Pages on every push to `main`.
+Drop `dry_run` to run it. Then score it:
+
+```bash
+curl -X POST localhost:8000/api/score \
+  -H 'content-type: application/json' \
+  -d '{"symbol":"AAPL","interval":"1m","replay_run_id":[7,8]}'
+```
+
+`max_analyses` is required. There's no way to start a run without saying how much you're willing to spend.
 
 ---
 
@@ -272,13 +213,13 @@ pytest
 ruff check .
 ```
 
-CI runs pytest, ruff, a UTF-8 encoding check, and a full compose build with health checks on every push.
+276 tests. CI runs those plus an encoding check and a full compose build with health checks on every push.
 
 ---
 
 ## Stack
 
-| Layer | Tech |
+| | |
 |---|---|
 | Services | Python |
 | Messaging | NATS JetStream |
@@ -287,20 +228,20 @@ CI runs pytest, ruff, a UTF-8 encoding check, and a full compose build with heal
 | Metrics | Prometheus |
 | Frontend | React, TypeScript, Vite, Tailwind |
 | Charting | lightweight-charts |
-| Infrastructure | Terraform, AWS ECS Fargate |
 | CI | GitHub Actions |
 
 ---
 
-## Roadmap
+## What's next
 
-- [ ] Postgres in place of SQLite
-- [ ] Run history and shareable analysis links
-- [ ] Replay mode for backtesting the agent against historical data
+- [ ] Deploy to AWS (ECS Fargate, Terraform)
+- [ ] Postgres instead of SQLite
+- [ ] A bigger sample — the trade grader needs ~100 resolved trades and has 4
+- [ ] Forex and gold, which needs the scoring thresholds re-swept per asset class
 
 ---
 
-**Disclaimer** — This tool is for learning and research. It is not investment advice. Trading carries risk; your decisions are your own.
+**Disclaimer** — This is for learning and research. It is not investment advice. Trading carries risk and your decisions are your own.
 
 ## License
 

@@ -112,13 +112,20 @@ interface Props {
   /** Display zone for every rendered timestamp. Affects nothing stored. */
   zone: Zone;
   onZone: (zone: Zone) => void;
-  /** Held in the parent's React state only - never persisted anywhere. */
+  /**
+   * Held in the parent's React state, and additionally in this browser's
+   * localStorage only when `remember` is on. Never sent to the server for
+   * storage either way.
+   */
   apiKey: string;
   onApiKey: (key: string) => void;
+  remember: boolean;
+  onRemember: (remember: boolean) => void;
+  onForget: () => void;
 }
 
 export default function SettingsModal({
-  onClose, apiKey, onApiKey, zone, onZone,
+  onClose, apiKey, onApiKey, zone, onZone, remember, onRemember, onForget,
 }: Props) {
   const [tab, setTab] = useState<Tab>("Model");
   const panel = useRef<HTMLDivElement>(null);
@@ -208,6 +215,9 @@ export default function SettingsModal({
                 <ApiKeyField
                   apiKey={apiKey}
                   onChange={onApiKey}
+                  remember={remember}
+                  onRemember={onRemember}
+                  onForget={onForget}
                   labelClass={FIELD_LABEL}
                   fieldClass={FIELD}
                   controlWidth={CONTROL_W}
