@@ -85,8 +85,8 @@ instrument and the sample landed where it said it would.
 
 ### Abstention — the lift flipped positive
 
-Miss rate **0.333** — 4 misses in 24 no-trade rows, all `miss_long` — against
-a base rate of **0.384** over the same series. Lift **+0.133**: the bars the
+Miss rate **0.333** — 8 misses in 24 no-trade rows, 4 `miss_long` and 4
+`miss_short` — against a base rate of **0.384** over the same series. Lift **+0.133**: the bars the
 model declined paid *less* often than bars picked at random. Run 6 measured
 **−0.402** on the same test, so this is a reversal, and the first positive
 abstention result on record.
@@ -111,18 +111,24 @@ disagreed with the geometry the same reply returned.
 | stop_placement | 2 | 0 | 22 | **0.917** |
 | risk_reward | 2 | 0 | 22 | **0.917** |
 
-The `na` rate is structural rather than evasive. **22 of 24 decisions were
-`no_trade`** — a 92% abstention rate — and a decision with no entry, stop or
-target genuinely has nothing for three of the four nodes to measure. The
-validator rejects `na` on a real trade, and both rows that did trade answered
-all four.
+The `na` rate is structural rather than evasive. **All 24 decisions were
+`no_trade`** — the model traded nothing across both sessions — and a decision
+with no entry, stop or target genuinely has nothing for three of the four
+nodes to measure.
+
+The two rows that answered `stop_placement` and `risk_reward` anyway are the
+most interesting thing the checklist has produced. They are `no_trade` rows
+that named the gate which stopped them: `risk_reward: fail` on both, with
+`stop_placement: too_tight` on one. That is the decline point made legible —
+a thing `reasoning_chain` could only ever assert in prose, and the reason for
+recording a path at all.
 
 `level_proximity` answered on every row because it falls back to the last
 close when there is no entry. That single design choice is the difference
 between 39 answered nodes and 4.
 
 **On the record, undecided: `stop_placement` and `risk_reward` cost tokens on
-every analysis and returned a check on roughly 8% of them.** At this
+every analysis and returned a check on 2 of 24 of them.** At a 100%
 abstention rate they may not be earning their tokens. Two runs is not enough
 to conclude it — a sample with more trades would change the arithmetic
 entirely, and these nodes are worthless precisely when they are cheapest to
@@ -166,10 +172,9 @@ for the regime, cycle and abstention gates, not enough for anything
 conditional — accuracy given a claimed trend rests on 10 rows here, 16 across
 both runs.
 
-**Zero trade rows.** 22 of 24 decisions were `no_trade`, and the 2 trades
-resolved to neither target nor stop inside the window, so the trade grader
-advanced not at all. Across runs 6 and 11 it stands at 4 resolved trades
-against a gate wanting 100.
+**Zero trade rows.** All 24 decisions were `no_trade`, so the trade grader
+advanced not at all. Across runs 6 and 11 it stands at the 4 resolved trades
+run 6 produced, against a gate wanting 100.
 
 ---
 
