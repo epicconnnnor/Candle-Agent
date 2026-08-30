@@ -21,10 +21,17 @@ import { useFeed } from "./hooks/useFeed";
 import { atr } from "./lib/indicators";
 import { loadRecent } from "./lib/recent";
 import { freshnessOf } from "./lib/freshness";
+import DemoBar from "./components/DemoBar";
 import { loadZone, storeZone } from "./lib/timezone";
 import type { Zone } from "./lib/timezone";
-import { getAnalysis, getSymbols, hasStatus, subscribe } from "./api/client";
-import type { Bar, IngestStatus, Interval, SymbolInfo } from "./api/types";
+import {
+  getAnalysis, getDemoSample, getDemoSamples, getDemoStatus, getSymbols,
+  hasStatus, subscribe, toBar,
+} from "./api/client";
+import type {
+  Bar, DemoSample, DemoSampleSummary, DemoStatus, IngestStatus, Interval,
+  SymbolInfo,
+} from "./api/types";
 
 const FALLBACK_SYMBOL = import.meta.env.VITE_DEFAULT_SYMBOL ?? "AAPL";
 /** Reopen on the last symbol picked, so a reload keeps your place. */
@@ -42,6 +49,18 @@ export default function App() {
   const [subscribing, setSubscribing] = useState(false);
   const [fault, setFault] = useState<IngestStatus | null>(null);
   const [revision, setRevision] = useState(0);
+
+  // A stored sample REPLACES what is displayed rather than being written
+  // into the feed. The live stream keeps running underneath and simply is
+  // not shown, so nothing arriving can quietly turn a stored example into
+  // something that looks live.
+  const [sample, setSample] = useState<DemoSample | null>(null);
+  const [samples, setSamples] = useState<DemoSampleSummary[]>([]);
+  const [sampleLoading, setSampleLoading] = useState(false);
+  // where to go back to: a sample moves the picker so the whole screen
+  // agrees with itself, and "Back to live" has to undo exactly that
+  const liveBefore = useRef<{ symbol: string; interval: string } | null>(null);
+  const [demoStatus, setDemoStatus] = useState<DemoStatus | null>(null);
   const [source, setSource] = useState("—");
   const [settingsOpen, setSettingsOpen] = useState(false);
   // The visitor's LLM key. React state by default, so a reload clears it;
@@ -175,8 +194,62 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const refreshDemoStatus = useCallback(() => {
+    getDemoStatus().then(setDemoStatus).catch(() => {
+      // a missing budget endpoint must not break the terminal
+      setDemoStatus(null);
+    });
+  }, []);
+
+  useEffect(() => {
+    getDemoSamples().then((r) => setSamples(r.samples)).catch(() => setSamples([]));
+    refreshDemoStatus();
+  }, [refreshDemoStatus]);
+
+  // the count only moves when an analysis actually completes
+  useEffect(() => {
+    if (feed.analysis) refreshDemoStatus();
+  }, [feed.analysis, refreshDemoStatus]);
+
+  const loadSample = useCallback(async (id: string) => {
+    setSampleLoading(true);
+    try {
+      const s = await getDemoSample(id);
+      // The picker follows the sample. Showing AAPL bars under a TSLA
+      // heading is the same class of error as a chart that looks live and
+      // is not - every label on screen has to name what is on screen.
+      // No load() call: the subscription is deliberately left alone.
+      liveBefore.current ??= { symbol, interval };
+      setSymbol(s.symbol);
+      setInterval(s.interval);
+      setSample(s);
+      setRevision((r) => r + 1);      // the series is replaced wholesale
+    } catch (e) {
+      setFault({
+        ts: Date.now(), mode: "", state: "error", kind: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setSampleLoading(false);
+    }
+  }, []);
+
+  const clearSample = useCallback(() => {
+    const back = liveBefore.current;
+    liveBefore.current = null;
+    setSample(null);
+    setRevision((r) => r + 1);
+    if (back) {
+      setSymbol(back.symbol);
+      setInterval(back.interval);
+      void load(back.symbol, back.interval);   // resubscribe to the live feed
+    }
+  }, [load]);
+
   const onSymbol = useCallback(
     (info: SymbolInfo) => {
+      setSample(null);            // an explicit choice leaves the example
+      liveBefore.current = null;
       setSymbol(info.symbol);
       void load(info.symbol, interval, info.source);
     },
@@ -185,13 +258,33 @@ export default function App() {
 
   const onInterval = useCallback(
     (next: string) => {
+      setSample(null);
+      liveBefore.current = null;
       setInterval(next);
       void load(symbol, next);
     },
     [symbol, load],
   );
 
-  const bars = feed.bars;
+  const sampleBars = useMemo(
+    () => (sample ? sample.bars.map((b) => toBar({ ...b, symbol: sample.symbol, interval: sample.interval })) : []),
+    [sample],
+  );
+  const bars = sample ? sampleBars : feed.bars;
+
+  // One analysis object for the whole render, from whichever source is on
+  // screen. A stored sample carries the market it was formed against, so
+  // staleness is judged against its own bars and never against the live
+  // price of a symbol it is not showing.
+  const analysis = sample
+    ? {
+        symbol: sample.symbol, interval: sample.interval,
+        bar_ts: sample.bar_ts, stage1: sample.stage1, stage2: sample.stage2,
+        model: sample.model, latency_ms: sample.latency_ms,
+      }
+    : feed.analysis;
+  const analysisPrice = sample ? sample.price_at : feed.analysisPrice;
+  const analysisAtr = sample ? sample.atr_at : feed.analysisAtr;
   const last = bars[bars.length - 1] ?? null;
   const prev = bars[bars.length - 2] ?? last;
   const change = last && prev ? last.close - prev.close : 0;
@@ -199,8 +292,8 @@ export default function App() {
   const atr14 = useMemo(() => atr(bars), [bars]);
 
   const freshness = freshnessOf({
-    analysisPrice: feed.analysisPrice,
-    analysisAtr: feed.analysisAtr,
+    analysisPrice,
+    analysisAtr,
     currentPrice: last?.close ?? null,
     currentAtr: atr14,
   });
@@ -252,18 +345,18 @@ export default function App() {
       : prog.snapshotAt !== null
         // snapshot landed, stage 1 has not: it is running right now
         ? { name: "Diagnosis", state: "running", status: "stage 1 running" }
-        : feed.analysis
+        : analysis
           // restored from storage: it finished, but not in this session, so
           // there is no elapsed time to report
           ? { name: "Diagnosis", state: "done", status: "done" }
           : { name: "Diagnosis", state: "idle", status: "no analysis yet" };
 
   const decisionStage: Stage =
-    prog.completedAt !== null && feed.analysis
+    prog.completedAt !== null && analysis
       ? { name: "Decision", state: "done", status: "done" }
       : prog.stage1At !== null
         ? { name: "Decision", state: "running", status: "stage 2 running" }
-        : feed.analysis
+        : analysis
           ? { name: "Decision", state: "done", status: "done" }
           : { name: "Decision", state: "idle", status: "no decision yet" };
 
@@ -272,7 +365,7 @@ export default function App() {
     snapshotStage,
     diagnosisStage,
     decisionStage,
-    feed.analysis
+    analysis
       ? { name: "Follow-up", state: "idle", status: "ask about this analysis" }
       : { name: "Follow-up", state: "idle", status: "needs an analysis" },
   ];
@@ -312,6 +405,17 @@ export default function App() {
         />
       )}
 
+      <DemoBar
+        samples={samples}
+        active={sample}
+        onLoad={loadSample}
+        onClear={clearSample}
+        loading={sampleLoading}
+        status={demoStatus}
+        usingOwnKey={Boolean(apiKey)}
+        zone={zone}
+      />
+
       <main className="mx-auto flex max-w-[1400px] flex-col gap-4 px-4 py-4">
         {/* alerts are global context like the strip above, not a module */}
         <StatusBanner
@@ -344,8 +448,8 @@ export default function App() {
                   zone={zone}
                   ref={chart}
                   bars={bars}
-                  stage1={feed.analysis?.stage1 ?? null}
-                  stage2={feed.analysis?.stage2 ?? null}
+                  stage1={analysis?.stage1 ?? null}
+                  stage2={analysis?.stage2 ?? null}
                   revision={revision}
                   scaleToLevels={freshness.state === "fresh"}
                 />
@@ -359,17 +463,17 @@ export default function App() {
             </Card>
 
             <Stage1Panel
-              analysis={feed.analysis}
+              analysis={analysis}
               symbol={symbol}
               interval={interval}
               freshness={freshness}
             />
             <DecisionCard
-              stage2={feed.analysis?.stage2 ?? null}
+              stage2={analysis?.stage2 ?? null}
               freshness={freshness}
             />
-            <DecisionPathCard stage2={feed.analysis?.stage2 ?? null} />
-            <ReasoningCard stage2={feed.analysis?.stage2 ?? null} />
+            <DecisionPathCard stage2={analysis?.stage2 ?? null} />
+            <ReasoningCard stage2={analysis?.stage2 ?? null} />
           </div>
 
           <div className="flex min-w-0 flex-col gap-4">
@@ -381,13 +485,13 @@ export default function App() {
               lastBarTime={last?.time ?? null}
             />
             <LevelsCard
-              stage1={feed.analysis?.stage1 ?? null}
+              stage1={analysis?.stage1 ?? null}
               lastClose={last?.close ?? null}
             />
             <ChatPanel
               symbol={symbol}
               apiKey={apiKey}
-              hasAnalysis={Boolean(feed.analysis)}
+              hasAnalysis={Boolean(analysis)}
             />
           </div>
         </div>
