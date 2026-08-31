@@ -412,3 +412,42 @@ def test_a_renamed_stage_heading_raises_rather_than_mis_splitting():
             orchestrator.assemble("stage2", "range")
     finally:
         path.write_bytes(original)
+
+
+def test_the_fingerprint_survives_a_windows_checkout():
+    """Line endings are a property of the checkout, not of the contract.
+
+    Git rewrites LF to CRLF on Windows, so hashing raw bytes gave one
+    commit two different identities - and the pooling guard would then
+    refuse to pool analyses whose prompts were character-for-character
+    identical. Measured before the fix: 130c36877d5928f8 in the Linux
+    container, 9ad6d422c1fd7354 on the Windows host that wrote the files.
+    """
+    from candle_agent import orchestrator
+
+    files = list(orchestrator.contract_prompts()) + list(orchestrator.contract_docs())
+    assert files
+    originals = {p: p.read_bytes() for p in files}
+    lf = orchestrator.prompt_fingerprint()
+    try:
+        for p, raw in originals.items():
+            p.write_bytes(raw.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+        assert orchestrator.prompt_fingerprint() == lf
+    finally:
+        for p, raw in originals.items():
+            p.write_bytes(raw)
+    assert orchestrator.prompt_fingerprint() == lf
+
+
+def test_a_real_content_change_still_moves_it():
+    """The normalisation must not blunt the hash into ignoring edits."""
+    from candle_agent import orchestrator
+
+    path = orchestrator.DOCS / "03-cycle.md"
+    original = path.read_bytes()
+    base = orchestrator.prompt_fingerprint()
+    try:
+        path.write_bytes(original + b"\nOne more sentence.\n")
+        assert orchestrator.prompt_fingerprint() != base
+    finally:
+        path.write_bytes(original)

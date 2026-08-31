@@ -1,0 +1,8 @@
+# The prompt contract is hashed into prompt_fingerprint, which decides
+# whether two analyses are comparable. prompt_fingerprint normalises line
+# endings before hashing, so this file is not what makes the hash correct -
+# it keeps working trees consistent so a diff is a real change rather than
+# a checkout artefact.
+*.md text eol=lf
+*.txt text eol=lf
+*.py text eol=lf
