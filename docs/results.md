@@ -1,9 +1,9 @@
 # Results
 
-Run 6 and run 11 are the two published results. Read them after the section
-below: the same bars replayed twice under the same prompt do not give the
-same numbers, and that governs how much weight any single figure here can
-carry.
+Three published results: run 6, run 11, and the paired comparison of the
+strategy-document prompt in runs 12-14. Read them after the section below —
+the same bars replayed twice under the same prompt do not give the same
+numbers, and that governs how much weight any single figure here can carry.
 
 ---
 
@@ -53,6 +53,95 @@ It turned out to be the only control in the project.
 Three points would give a variance worth quoting; two give a range, and the
 range is what is used above. Nothing here supports a confidence interval, and
 none is claimed.
+
+## Score runs 12, 13 and 14 — do the strategy documents change anything?
+
+A paired comparison. All three score runs cover **the same 24 decision bars**
+— 2026-08-26 and 08-28, stride 30 — under `scorer_version` 3, 24 rows and 24
+independent windows each. Runs 12 and 13 are two samples of the *same* prompt;
+run 14 is the strategy-document prompt on those same bars. So the only thing
+that differs between 13 and 14 is the prompt, and the gap between 12 and 13 is
+what the prompt changing nothing looks like.
+
+| | 12 old-A | 13 old-B | **14 docs** |
+| --- | --- | --- | --- |
+| fingerprint | `d1bce29b` | `d1bce29b` | `e7ed0b6d` |
+| replay runs | 7 + 8 | 9 + 10 | 11 + 12 |
+| **trend calls / 24** | 10 | 13 | **7** |
+| bull / bear | 6 / 4 | 8 / 5 | **7 / 0** |
+| trend calls correct | 1 | 1 | **1** |
+| regime accuracy | 0.500 | 0.4167 | 0.4167 |
+| cycle accuracy | 0.375 | 0.2917 | **0.500** |
+| strength rank correlation | −0.18 | −0.047 | **+0.15** |
+| abstention lift | +0.133 | +0.334 | +0.151 |
+| decisions resolved | none | 2 stopped | 1 unfilled |
+| tokens per analysis | 4,952 | 4,888 | **9,392** |
+
+Every run still fails `beats_majority` on both regime (baseline 0.833) and
+cycle (baseline 0.750).
+
+### Fewer trend calls, not better ones
+
+Trend calls fell to 7, below both old samples. But the old samples differ from
+each other by 3, and 10 → 7 is also 3. **The effect is the same size as the
+noise**, on two points of it.
+
+What did not move at all is the numerator. One correct trend call in every
+run: 1 of 10, 1 of 13, 1 of 7 — always the same window, 2026-08-26 09:30 —
+and recall of 0.33 in all three, the same single real trend caught and the
+same two missed. The documents made the model call fewer trends. They did not
+make it call them better.
+
+### What did move
+
+**Bear calls went to zero**, against 4 and 5 before. No bear trend was
+realized in these 24 windows, so every bear call the old prompt made was
+necessarily wrong, and the documents stopped making them.
+
+**The error composition shifted toward the cheap kind.**
+
+| verdict | 12 old-A | 13 old-B | 14 docs |
+| --- | --- | --- | --- |
+| exact | 12 | 10 | 10 |
+| false_trend | 9 | 12 | **6** |
+| amplitude_error | 1 | 0 | **6** |
+| missed_trend | 2 | 2 | 2 |
+
+`regime_verdict` calls `false_trend` overtrading risk and `amplitude_error`
+"nearly the same trade". Six expensive errors became six cheap ones while the
+total stayed put — accuracy is unchanged at 0.4167 because `exact` did not
+move. This is the clearest thing the documents did, and it is invisible in an
+accuracy figure.
+
+**Cycle accuracy 0.500** is the best of the three and sits outside the
+old-sample range of 0.29–0.375. Still well under its 0.750 baseline.
+
+**Strength correlation turned positive** for the first time, +0.15 against
+−0.18 and −0.047, though `monotonic` is false in all three. Moved, not fixed.
+
+### What did not move
+
+**The na rates are unchanged.** `stop_placement` and `risk_reward` sit at
+0.917 under the documents, against 0.917 and 0.875 before; `level_proximity`
+is answered on every row in all three. The checklist is no more answerable
+than it was, and the open question recorded under score run 11 stands exactly
+as written.
+
+**Zero contradictions**, in all three runs. No reply has yet disagreed with
+its own geometry.
+
+### The cost
+
+**9,392 tokens per analysis against ~4,900** — 1.9x, for the numbers above.
+At `DEMO_DAILY_ANALYSES` 200 that is 1.88M tokens a day rather than 0.98M.
+
+### What would settle it
+
+A third sample of the old prompt, which would turn a range into something
+worth quoting, and more sessions. On this evidence the documents bought a
+shift in the kind of error and possibly a cycle-accuracy improvement, at
+roughly double the cost, with the headline trend-call change indistinguishable
+from a re-roll.
 
 ## Score run 11 — the trend claim replicates
 
