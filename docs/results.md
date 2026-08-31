@@ -28,13 +28,15 @@ majority class, it has so far been wrong every time.**
 
 ### Gates
 
-Every gate that could pass, passed — and all three passing results are
-negative for the model. This is the first run where the regime and cycle
-graders clear on sample size.
+Every gate that could pass, passed — and every passing result is negative
+for the model. This is the first run where the regime and cycle graders
+clear on sample size, and the strength grader was added afterwards (score
+run 12, `scorer_version` 3) over the same rows.
 
 | grader | rows | independent windows | gate | result |
 | --- | --- | --- | --- | --- |
 | regime | 24 | 24 | **passed** | accuracy 0.500 vs 0.833 baseline — `beats_majority: false` |
+| strength | 24 | 24 | **passed** | ordering does not hold — `monotonic: false`, rho −0.18 (added in score run 12) |
 | cycle | 24 | 24 | **passed** | accuracy 0.375 vs 0.750 baseline — `beats_majority: false` |
 | abstention | 24 | 24 | **passed** | miss rate 0.333 vs base 0.384, lift **+0.133** |
 | trade | 0 | 0 | **refused** | needs 100 rows and 30 independent windows |
@@ -98,6 +100,52 @@ comparison between the model and random bars is fair; the threshold behind it
 was not chosen in advance of this data. Treat the sign as suggestive and the
 magnitude as uncalibrated until the barriers are re-swept on a series no
 scored run has touched.
+
+### Strength — asserted on every analysis, and it carries no information
+
+Stage 1 has reported a `strength` on every analysis since the beginning and
+nothing ever checked it. Score run 12 re-scored run 11's population under
+`scorer_version` 3 to find out.
+
+There is no realized strength to compare a claim against, so it is graded as
+an **ordering** rather than a label: whatever the model means by strong,
+moderate and weak, the windows it calls strong should have travelled further
+than the ones it calls weak. Magnitude only — `|displacement|` in ATR — since
+direction is the regime grader's question and grading it twice would count
+the same error against the model in two places.
+
+| claimed | n | mean \|displacement\| ATR |
+| --- | --- | --- |
+| weak | 12 | **4.32** |
+| moderate | 11 | **2.02** |
+| strong | 1 | 3.69 |
+
+**The ordering does not hold.** `monotonic: false`, rank correlation
+**−0.18**. The windows the model called *weak* moved the furthest of the
+three groups, and the ones it called *moderate* moved least. The correlation
+is slightly negative rather than merely absent, though on 24 rows that sign
+is not worth defending — what the number supports is that strength does not
+track magnitude, not that it inverts it.
+
+The gate passes: 24 rows over 24 independent windows, the same window and the
+same population as the regime grader, so the same evidence bar.
+
+Two things make this weaker than it looks and one makes it stronger.
+
+**Weaker.** `strong` was used once in 24 analyses, so its group mean is a
+single observation. The finding rests on weak-versus-moderate, which is the
+comparison that inverts.
+
+**Weaker.** `|displacement|` over the 30-bar forward window is one reading of
+"how much did it move". A model meaning something else by strength — the
+cleanliness of the structure, say, rather than the distance travelled — would
+score badly here while being internally consistent. The grader tests one
+interpretation, and states it.
+
+**Stronger.** The field has been in every prompt, every stored row and every
+UI card since the project started, and it is the first grader to look at it.
+Whatever it has been contributing, it has not been contributing information
+about how far price was about to travel.
 
 ### Decision path — first scored run, and a question it raises
 

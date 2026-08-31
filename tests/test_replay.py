@@ -289,3 +289,49 @@ def test_config_exposes_every_field_the_replay_service_reads():
     service referenced config.LLM_MODEL before it existed."""
     for field in ("LLM_MODEL", "LLM_PROVIDER", "ANALYZE_EVERY", "MIN_BARS", "INTERVAL"):
         assert hasattr(config, field), f"config is missing {field}"
+
+
+def test_the_estimate_is_scoped_to_the_current_prompt_contract(tmp_path, monkeypatch):
+    """Averaging across contracts prices a run nobody is going to make.
+
+    Adding the strategy documents roughly doubled the cost per analysis.
+    An estimator averaging pre-doc and post-doc runs together reported
+    3,916 against a measured ~8,600, which is low by more than half.
+    """
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "estimate.db"))
+    from candle_agent import db
+    from candle_agent.orchestrator import prompt_fingerprint
+    from candle_agent.services import replay
+
+    current = prompt_fingerprint()
+    for _ in range(4):                      # cheap, and from an old contract
+        db.insert_analysis("AAPL", 1, {"regime": "range"}, {"decision": "no_trade"},
+                           "m", 1, prompt_tokens=1000, completion_tokens=100,
+                           prompt_fingerprint="0000000000000000")
+    for _ in range(2):                      # expensive, and current
+        db.insert_analysis("AAPL", 2, {"regime": "range"}, {"decision": "no_trade"},
+                           "m", 1, prompt_tokens=8000, completion_tokens=600,
+                           prompt_fingerprint=current)
+
+    est = replay.estimate(10, 10, None)
+
+    assert est["tokens_per_analysis"] == 8600      # not the 3,533 blended mean
+    assert current in est["basis"]
+    assert "2 analyses" in est["basis"]
+
+
+def test_the_estimate_says_so_when_it_has_to_cross_contracts(tmp_path, monkeypatch):
+    """A stale basis stated as stale beats no number at all."""
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "estimate2.db"))
+    from candle_agent import db
+    from candle_agent.services import replay
+
+    db.insert_analysis("AAPL", 1, {"regime": "range"}, {"decision": "no_trade"},
+                       "m", 1, prompt_tokens=1000, completion_tokens=100,
+                       prompt_fingerprint="0000000000000000")
+
+    est = replay.estimate(10, 10, None)
+
+    assert est["tokens_per_analysis"] == 1100
+    assert "ACROSS" in est["basis"]
+    assert "may be well off" in est["basis"]
