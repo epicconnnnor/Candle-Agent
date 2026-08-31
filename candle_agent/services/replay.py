@@ -36,6 +36,7 @@ import os
 
 from .. import bus, config, db
 from ..metrics import serve_metrics
+from ..orchestrator import prompt_fingerprint
 
 # a bar whose analysis never arrives; the model is dead or erroring
 COMPLETION_TIMEOUT_S = float(os.environ.get("REPLAY_TIMEOUT_S", "180"))
@@ -155,10 +156,15 @@ def _validate(req: dict) -> tuple[dict | None, str | None]:
 def estimate(bars_total: int, max_analyses: int, model: str | None) -> dict:
     """Cost a run before committing to it, from measured history if we have any."""
     planned = min(bars_total, max_analyses)
-    stats = db.token_stats(model)
+    fingerprint = prompt_fingerprint()
+    stats = db.token_stats(model, fingerprint)
     if stats["samples"]:
         per = (stats["avg_prompt"] or 0) + (stats["avg_completion"] or 0)
-        basis = f"measured from {stats['samples']} stored analyses"
+        basis = (f"measured from {stats['samples']} analyses under the current "
+                 f"prompt contract {fingerprint}" if stats["scoped"] else
+                 f"measured from {stats['samples']} stored analyses ACROSS "
+                 "prompt contracts - no measured history under the current "
+                 f"one ({fingerprint}) yet, so this may be well off")
     else:
         per = ASSUMED_TOKENS_PER_ANALYSIS
         basis = "estimated - no measured usage stored yet"

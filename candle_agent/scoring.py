@@ -31,7 +31,7 @@ from . import paper
 from .features import atr as atr_series, envelope_atr, nearest_level_distance
 from .schemas import PATH_NODES, consistency_errors
 
-SCORER_VERSION = "2"
+SCORER_VERSION = "3"
 
 TREND_REGIMES = ("bull_trend", "bear_trend")
 FLAT_REGIMES = ("range", "chop")
@@ -315,6 +315,86 @@ def score_path(stage1: dict, stage2: dict, anchor, atr, params: dict) -> dict:
                       "distance_atr": nearest_level_distance(
                           reference, atr, stage1.get("key_levels"))
                       if reference and atr else None},
+    }
+
+
+# Stage 1 asserts a strength on every analysis and nothing has ever
+# checked it. It is not a label with a realized counterpart - there is no
+# "actual strength" to compare against - so it is graded as an ORDERING:
+# whatever the model means by strong, moderate and weak, the windows it
+# calls strong should move further than the ones it calls weak.
+STRENGTH_ORDER = {"weak": 0, "moderate": 1, "strong": 2}
+
+
+def rank_correlation(pairs) -> float | None:
+    """Spearman's rho, ties averaged. None below three pairs.
+
+    Written out rather than imported: scipy is not a dependency, this is
+    twenty lines, and a coefficient nobody can read the source of is a
+    number that gets trusted without being understood.
+    """
+    pairs = [(a, b) for a, b in pairs if a is not None and b is not None]
+    n = len(pairs)
+    if n < 3:
+        return None
+
+    def ranks(values):
+        order = sorted(range(n), key=lambda i: values[i])
+        out = [0.0] * n
+        i = 0
+        while i < n:
+            j = i
+            while j + 1 < n and values[order[j + 1]] == values[order[i]]:
+                j += 1
+            shared = (i + j) / 2 + 1          # average rank for the tie group
+            for k in range(i, j + 1):
+                out[order[k]] = shared
+            i = j + 1
+        return out
+
+    rx, ry = ranks([p[0] for p in pairs]), ranks([p[1] for p in pairs])
+    mx, my = sum(rx) / n, sum(ry) / n
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    den = (sum((a - mx) ** 2 for a in rx) * sum((b - my) ** 2 for b in ry)) ** 0.5
+    return round(num / den, 4) if den else None
+
+
+def strength_ordering(rows: list[dict]) -> dict:
+    """Does claimed strength track how far price actually travelled?
+
+    Magnitude only: |displacement| in ATR, so a strong call that goes the
+    wrong way still counts as a big move. Direction is the regime grader's
+    question and grading it twice would double-count the same error.
+
+    Monotonicity is reported alongside the correlation because they fail
+    differently. Means can order correctly on two rows of noise; rho says
+    whether the ordering holds row by row.
+    """
+    graded = [r for r in rows
+              if r.get("claimed_strength") in STRENGTH_ORDER
+              and r.get("fwd_return_atr") is not None]
+    by_label: dict[str, list[float]] = {}
+    for r in graded:
+        by_label.setdefault(r["claimed_strength"], []).append(abs(r["fwd_return_atr"]))
+
+    means = {k: round(sum(v) / len(v), 4) for k, v in by_label.items()}
+    present = [k for k in ("weak", "moderate", "strong") if k in means]
+    monotonic = (None if len(present) < 2
+                 else all(means[a] < means[b] for a, b in zip(present, present[1:])))
+
+    return {
+        "rows": len(graded),
+        "counts": {k: len(v) for k, v in by_label.items()},
+        "mean_abs_displacement_atr": means,
+        "labels_used": present,
+        # weak < moderate < strong, over whichever labels the model used
+        "monotonic": monotonic,
+        "rank_correlation": rank_correlation(
+            [(STRENGTH_ORDER[r["claimed_strength"]], abs(r["fwd_return_atr"]))
+             for r in graded]),
+        "note": ("claimed strength against |displacement| in ATR. Not a "
+                 "realized label - there is no true strength to compare "
+                 "against - so this asks only whether the ordering holds."),
     }
 
 
@@ -816,6 +896,9 @@ REQUIREMENTS = {
     "trade_win_rate": (100, 30),
     "abstention_lift": (20, 5),
     "regime_accuracy": (20, 5),
+    # the same window and the same population as regime accuracy, so the
+    # same evidence bar
+    "strength_ordering": (20, 5),
     # Same shape as regime_accuracy: the same window, the same
     # majority-baseline comparison, so the same evidence bar.
     "cycle_accuracy": (20, 5),
@@ -971,6 +1054,15 @@ def summarize(rows: list[dict], params: dict, interval_ms: int,
             "horizon_bars": horizon,
             **_verdict("regime_accuracy", len(regimes), windows(regimes),
                        "a regime accuracy against the majority-class baseline"),
+        },
+        "strength": {
+            **strength_ordering(scored),
+            "horizon_bars": horizon,
+            **_verdict("strength_ordering", len(
+                [r for r in scored if r.get("claimed_strength") in STRENGTH_ORDER
+                 and r.get("fwd_return_atr") is not None]),
+                windows(scored),
+                "an ordering of claimed strength against realized magnitude"),
         },
         "cycle": {
             "verdicts": _counts(cycles, "cycle_verdict"),

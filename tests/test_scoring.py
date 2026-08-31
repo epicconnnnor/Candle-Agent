@@ -858,3 +858,60 @@ def test_path_grader_is_absent_not_zero_when_there_is_no_path():
     out = scoring.score_path({}, stage2, 100.0, 1.0, _cycle_params())
     assert out["path_nodes_answered"] is None
     assert out["path_json"] is None
+
+
+# --- strength ordering --------------------------------------------------
+
+def _srow(strength, displacement):
+    return {"claimed_strength": strength, "fwd_return_atr": displacement}
+
+
+def test_strength_ordering_holds_when_bigger_claims_move_further():
+    out = scoring.strength_ordering([
+        _srow("weak", 0.4), _srow("weak", -0.6),
+        _srow("moderate", 1.5), _srow("moderate", -1.7),
+        _srow("strong", 3.9), _srow("strong", -4.2),
+    ])
+    assert out["monotonic"] is True
+    assert out["rank_correlation"] > 0.9
+    assert out["counts"] == {"weak": 2, "moderate": 2, "strong": 2}
+
+
+def test_strength_ordering_catches_an_inverted_claim():
+    """The finding this grader exists to make."""
+    out = scoring.strength_ordering([
+        _srow("weak", 4.0), _srow("weak", 3.8),
+        _srow("strong", 0.3), _srow("strong", 0.5),
+    ])
+    assert out["monotonic"] is False
+    assert out["rank_correlation"] < 0
+
+
+def test_strength_is_graded_on_magnitude_not_direction():
+    """A strong call that goes the wrong way still made a big move.
+
+    Direction is the regime grader's question; grading it here too would
+    count the same error twice.
+    """
+    up = scoring.strength_ordering([
+        _srow("weak", 0.2), _srow("moderate", 1.0), _srow("strong", 3.0)])
+    down = scoring.strength_ordering([
+        _srow("weak", -0.2), _srow("moderate", -1.0), _srow("strong", -3.0)])
+    assert up["mean_abs_displacement_atr"] == down["mean_abs_displacement_atr"]
+
+
+def test_strength_ordering_is_none_on_one_label():
+    """A model that only ever says 'moderate' has no ordering to check."""
+    out = scoring.strength_ordering([_srow("moderate", 1.0), _srow("moderate", 2.0)])
+    assert out["monotonic"] is None
+    assert out["labels_used"] == ["moderate"]
+
+
+def test_rank_correlation_needs_three_pairs():
+    assert scoring.rank_correlation([(0, 1.0), (1, 2.0)]) is None
+    assert scoring.rank_correlation([(0, 1.0), (1, 2.0), (2, 3.0)]) == 1.0
+
+
+def test_rank_correlation_averages_ties():
+    """All-tied values have no variance, so rho is undefined, not zero."""
+    assert scoring.rank_correlation([(0, 5.0), (1, 5.0), (2, 5.0)]) is None

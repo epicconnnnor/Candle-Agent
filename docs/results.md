@@ -1,18 +1,75 @@
 # Results
 
-Two scored runs. Run 11 is the later one and the more important, because it
-repeats run 6's central finding on a sample that shares no bars with it.
+Run 6 and run 11 are the two published results. Read them after the section
+below: the same bars replayed twice under the same prompt do not give the
+same numbers, and that governs how much weight any single figure here can
+carry.
 
 ---
 
+## Read every accuracy number here against the noise floor
+
+**The same bars, the same prompt and the same model, replayed twice, do not
+produce the same numbers.** This is a fact about the measurement, not about
+the model, and it changes how everything below should be read.
+
+Replay runs 9 and 10 re-analysed the exact decision bars runs 7 and 8 had
+already covered — 2026-08-26 and 08-28, stride 30, prompt fingerprint
+`d1bce29bb8346cd8` both times. Nothing differed but the sampling of the
+model's own output.
+
+| | runs 7+8 | runs 9+10 |
+| --- | --- | --- |
+| trend calls / 24 | 10 | **13** |
+| regime accuracy | 0.500 | **0.4167** |
+| cycle accuracy | 0.375 | **0.2917** |
+| strength rank correlation | −0.18 | −0.047 |
+| trades resolved | 0 | 2 |
+| abstention lift | +0.133 | +0.334 |
+
+Trend calls moved by 3. Regime accuracy moved 8 points, cycle accuracy 8
+points, abstention lift by 0.20 — which is larger than the entire measured
+gap between the lift being negative and positive.
+
+**Two consequences.**
+
+Any difference between two score runs smaller than this is not evidence of
+anything. A prompt change that moves the trend-call rate by 3, or accuracy by
+8 points, has moved it by exactly as much as re-rolling the same prompt does.
+The comparison of the strategy-document prompt below is reported against this
+floor rather than against zero.
+
+And every single-sample figure in this document carries an error bar that was
+never stated when it was written. Run 6's 0.781 and run 11's 0.500 are each
+one draw. They are not wrong, but they were reported as though re-running
+would reproduce them, and it does not.
+
+This was found by accident. Runs 9 and 10 were launched against a stale
+`analyzer` container and unintentionally repeated the old prompt instead of
+the new one — roughly 117,000 tokens spent on what looked like a wasted run.
+It turned out to be the only control in the project.
+
+**What it does not excuse.** Two samples give a spread, not a distribution.
+Three points would give a variance worth quoting; two give a range, and the
+range is what is used above. Nothing here supports a confidence interval, and
+none is claimed.
+
 ## Score run 11 — the trend claim replicates
 
-**The model called a trend 10 times and the forward window realized a trend
-zero times. Run 6 found the same thing on an independent sample: 6 trend
-calls, 0 correct.** Sixteen trend claims across two disjoint samples, none of
-them right.
+**The model called a trend 10 times and was right once. Run 6 found the same
+shape on an independent sample: 6 trend calls, 0 correct.** Sixteen trend
+claims across two disjoint samples, one of them right.
 
-That is the finding. Everything below is context for it.
+That is the finding, and it is weaker than the version first published here,
+which said the forward window realized a trend zero times and put the count
+at 16 for 16. It was 15 for 16. The one correct call is 2026-08-26 09:30,
+`bar_ts=1787751000000` — a window whose efficiency is 0.404 and whose
+displacement is +3.92 ATR, both computed by hand over the exact 30 bars the
+model was shown. It passes the trend test comfortably and `bull_trend` was
+the right answer.
+
+Read it against the noise floor above as well. A second sample of the same
+prompt on the same bars made 13 trend calls rather than 10.
 
 The two samples share no decision bars and no forward windows. Run 6 scored
 2026-08-24, 08-25 and 08-27; run 11 scored 08-26 and 08-28, which run 2 never
@@ -28,13 +85,15 @@ majority class, it has so far been wrong every time.**
 
 ### Gates
 
-Every gate that could pass, passed — and all three passing results are
-negative for the model. This is the first run where the regime and cycle
-graders clear on sample size.
+Every gate that could pass, passed — and every passing result is negative
+for the model. This is the first run where the regime and cycle graders
+clear on sample size, and the strength grader was added afterwards (score
+run 12, `scorer_version` 3) over the same rows.
 
 | grader | rows | independent windows | gate | result |
 | --- | --- | --- | --- | --- |
 | regime | 24 | 24 | **passed** | accuracy 0.500 vs 0.833 baseline — `beats_majority: false` |
+| strength | 24 | 24 | **passed** | ordering does not hold — `monotonic: false`, rho −0.18 (added in score run 12) |
 | cycle | 24 | 24 | **passed** | accuracy 0.375 vs 0.750 baseline — `beats_majority: false` |
 | abstention | 24 | 24 | **passed** | miss rate 0.333 vs base 0.384, lift **+0.133** |
 | trade | 0 | 0 | **refused** | needs 100 rows and 30 independent windows |
@@ -57,7 +116,9 @@ ignores the chart entirely. Run 6 was 18.8 points worse; the gap widened.
 
 Claimed 14 `range`, 6 `bull_trend`, 4 `bear_trend`. Realized 20 `range`, 3
 `bull_trend`, 1 `chop`. Nine of the ten trend calls landed on windows that
-realized as ranges; the tenth is the `amplitude_error`.
+realized as ranges; the tenth was correct. The `amplitude_error` comes from a
+`range` claim that realized as `chop`, not from a trend call — a trend claim
+cannot produce that verdict, which is how the original reading was caught.
 
 ### Cycle — first scored run for this field
 
@@ -98,6 +159,52 @@ comparison between the model and random bars is fair; the threshold behind it
 was not chosen in advance of this data. Treat the sign as suggestive and the
 magnitude as uncalibrated until the barriers are re-swept on a series no
 scored run has touched.
+
+### Strength — asserted on every analysis, and it carries no information
+
+Stage 1 has reported a `strength` on every analysis since the beginning and
+nothing ever checked it. Score run 12 re-scored run 11's population under
+`scorer_version` 3 to find out.
+
+There is no realized strength to compare a claim against, so it is graded as
+an **ordering** rather than a label: whatever the model means by strong,
+moderate and weak, the windows it calls strong should have travelled further
+than the ones it calls weak. Magnitude only — `|displacement|` in ATR — since
+direction is the regime grader's question and grading it twice would count
+the same error against the model in two places.
+
+| claimed | n | mean \|displacement\| ATR |
+| --- | --- | --- |
+| weak | 12 | **4.32** |
+| moderate | 11 | **2.02** |
+| strong | 1 | 3.69 |
+
+**The ordering does not hold.** `monotonic: false`, rank correlation
+**−0.18**. The windows the model called *weak* moved the furthest of the
+three groups, and the ones it called *moderate* moved least. The correlation
+is slightly negative rather than merely absent, though on 24 rows that sign
+is not worth defending — what the number supports is that strength does not
+track magnitude, not that it inverts it.
+
+The gate passes: 24 rows over 24 independent windows, the same window and the
+same population as the regime grader, so the same evidence bar.
+
+Two things make this weaker than it looks and one makes it stronger.
+
+**Weaker.** `strong` was used once in 24 analyses, so its group mean is a
+single observation. The finding rests on weak-versus-moderate, which is the
+comparison that inverts.
+
+**Weaker.** `|displacement|` over the 30-bar forward window is one reading of
+"how much did it move". A model meaning something else by strength — the
+cleanliness of the structure, say, rather than the distance travelled — would
+score badly here while being internally consistent. The grader tests one
+interpretation, and states it.
+
+**Stronger.** The field has been in every prompt, every stored row and every
+UI card since the project started, and it is the first grader to look at it.
+Whatever it has been contributing, it has not been contributing information
+about how far price was about to travel.
 
 ### Decision path — first scored run, and a question it raises
 

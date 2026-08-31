@@ -587,17 +587,38 @@ def max_id(table: str) -> int:
         return c.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()[0]
 
 
-def token_stats(model: str | None = None) -> dict:
-    """Measured tokens per analysis, for costing a run before it starts."""
-    where, params = "prompt_tokens IS NOT NULL", []
-    if model:
-        where += " AND model=?"
-        params.append(model)
-    with conn() as c:
-        r = c.execute(
-            f"SELECT COUNT(*), AVG(prompt_tokens), AVG(completion_tokens) "
-            f"FROM analyses WHERE {where}", params).fetchone()
-    return {"samples": r[0], "avg_prompt": r[1], "avg_completion": r[2]}
+def token_stats(model: str | None = None,
+                prompt_fingerprint: str | None = None) -> dict:
+    """Measured tokens per analysis, for costing a run before it starts.
+
+    Scoped to one prompt contract by default, because an average across
+    contracts prices a run that nobody is going to make. Adding the
+    strategy documents raised the measured cost from ~5,100 tokens to
+    ~8,600, and an estimator averaging both said 3,916 - low by more than
+    half against the prompt actually about to run.
+
+    Falls back to the unscoped average when the current contract has no
+    measured history yet, since a stale basis stated as such beats no
+    number at all. `scoped` says which happened.
+    """
+    def measure(extra_where, extra_params):
+        where, params = ["prompt_tokens IS NOT NULL"], []
+        if model:
+            where.append("model=?")
+            params.append(model)
+        where.extend(extra_where)
+        params.extend(extra_params)
+        with conn() as c:
+            r = c.execute(
+                "SELECT COUNT(*), AVG(prompt_tokens), AVG(completion_tokens) "
+                f"FROM analyses WHERE {' AND '.join(where)}", params).fetchone()
+        return {"samples": r[0], "avg_prompt": r[1], "avg_completion": r[2]}
+
+    if prompt_fingerprint:
+        scoped = measure(["prompt_fingerprint=?"], [prompt_fingerprint])
+        if scoped["samples"]:
+            return {**scoped, "scoped": True}
+    return {**measure([], []), "scoped": False}
 
 
 # --- scoring ---
