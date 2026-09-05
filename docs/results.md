@@ -1,5 +1,7 @@
 # Results
 
+[Home](../README.md) · [Technical guide](technical-guide.md) · [Scoring design](scoring-design.md)
+
 Three published results: run 6, run 11, and the paired comparison of the
 strategy-document prompt in runs 12-14. Read them after the section below —
 the same bars replayed twice under the same prompt do not give the same

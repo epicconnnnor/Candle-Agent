@@ -1,248 +1,73 @@
-![Cover](image/Candle-Agent.png)
-
 # Candle Agent
 
-📈 I wanted to know whether an LLM can actually read a chart. Not whether it can *sound* like it can — whether it can.
+A price-action analysis assistant for traders who want to inspect market structure, review possible setups, and ask questions about the reasoning.
 
-So I built two things. A system that streams live market data, asks an LLM what it sees, and shows you the answer. And a harness that grades every one of those answers against what the market did next.
+Run it on your own computer and use it in your browser. Candle Agent reads structured candle data, produces a market diagnosis, and explains a possible trade setup or a no-trade decision. It does not place orders.
 
-The second part is the interesting one. It told me the model doesn't work.
+![Candle Agent showing a chart, market diagnosis, support and resistance levels, and follow-up panel](assets/Candle-Agent.png)
 
-**It does not connect to a broker and it does not place orders.** It tells you what it sees, and I check whether it was right.
+**[Install locally](docs/installation.md)** · [User guide](docs/user-guide.md) · [Technical guide](docs/technical-guide.md)
 
----
+## What you can do
 
-## What it does
+- **Read the market:** inspect trends, ranges, market cycles, and key price levels.
+- **Review a setup:** see the entry, stop, target, decision path, and explanation when a setup is returned.
+- **Ask follow-up questions:** discuss a completed analysis and what would invalidate it.
+- **Explore saved examples:** view included AAPL, MSFT, and TSLA analyses without API keys or model charges.
+- **Evaluate the output:** replay stored history and score analyses against subsequent price action.
 
-- 📈 **Streams live candles** from Alpaca (US stocks + crypto) or Binance
-- 🧠 **Two-stage analysis** — first describe the market, then decide what to do about it
-- 🛡️ **Checks the model's work** — schema, geometry, and consistency, with retries
-- 📡 **Pushes results live** to your browser over SSE
-- 📊 **Draws it on the chart** — entry, stop, target, and key levels
-- ⏪ **Replays history** through the same pipeline, one bar at a time
-- 🎯 **Scores every call** against what actually happened next
-- 🚫 **Refuses to report numbers** the sample can't support
-- 🔑 **Bring your own API key** — yours, not mine, and it never touches my server
-- 🔀 **Runs as separate services** over NATS, so a slow model can't block data
-- 📉 **Prometheus metrics** on everything
+Analysis has two stages: first the model describes the market, then it uses that diagnosis to assess a setup. A no-trade result is a normal outcome.
 
----
+## Get started
 
-## Why two stages
+Start with the **[local installation guide](docs/installation.md)**. It walks through Windows PowerShell and macOS/Linux setup, then opens a saved example so you can explore the interface before configuring any accounts.
 
-I tried one prompt first. The model would jump straight to "buy here" without ever saying what kind of market it was looking at, and the answers were all over the place.
+You need Git, Docker with Compose v2, and Node.js with npm. Python runs inside Docker; a separate Python installation is only needed for backend development.
 
-So I split it in half.
+There is no hosted service to sign up for in this guide. You start the backend and browser interface on your computer. Optional real market data and model calls require internet access and the relevant provider credentials.
 
-**Stage 1 only describes.** What's the regime, where are the levels, is the range expanding or contracting. No trade talk allowed.
+After installation:
 
-**Stage 2 reads that description and decides.** Entry, stop, target, and why. Or no trade — which is a real answer and happens a lot.
+1. Load a saved example and inspect its diagnosis and price levels.
+2. Follow the optional setup for real market data and a model provider.
+3. Select a symbol and timeframe, click **Analyze**, and read the result.
+4. Use **Follow-up** to ask about the completed analysis.
 
-The point is that stage 2 inherits stage 1 as a commitment, not a suggestion. It can't invent a long setup after stage 1 said bearish, because the playbook it gets routed to won't allow it. That one change did more for output quality than any prompt tuning I tried.
+See the [user guide](docs/user-guide.md) for the controls and their current limitations.
 
----
+## Markets and data
 
-## Does it work?
+| Source | Coverage | Credentials |
+| --- | --- | --- |
+| Alpaca | US stocks and crypto | Alpaca key ID and secret |
+| Binance | Crypto pairs, where the service is accessible | No market-data key |
+| Saved examples | Included historical AAPL, MSFT, and TSLA analyses | None |
+| Synthetic demo | Generated candles with a mock model for testing | None |
 
-Most projects like this can't answer that. This one can, which is the
-part I'd point at.
+Supported intervals are 1m, 5m, 15m, 1h, 4h, and 1d. Availability and history depend on the source. Binance can return a regional restriction, including from US connections.
 
-I replay historical bars through the live pipeline one at a time, with
-the analyzer unable to tell replay from live. It never sees a bar from
-the future — enforced in the query, and tested with a check that
-deliberately breaks the guard to confirm the test would notice.
+## Limitations and evaluation
 
-Then every analysis is graded against the next 30 bars.
+Candle Agent is experimental. A structured explanation is not evidence that a setup will succeed.
 
-**On what I've measured so far** — AAPL 1m, three sessions,
-deepseek-chat:
+In the reported small AAPL 1-minute evaluation, the model did not beat the majority-class baseline for regime and cycle classification. Repeating analyses also changed the results. These findings do not establish performance across other markets or timeframes, and the trade sample is too small to establish profitability.
 
-| | Model | A predictor that ignores the chart |
-|---|---|---|
-| Regime accuracy | 0.500 | 0.833 |
-| Cycle accuracy | 0.375 | 0.750 |
+The [evaluation results](docs/results.md) retain the measurements and caveats. The [scoring design](docs/scoring-design.md) explains baselines, overlapping samples, and when the scorer withholds a result.
 
-The model doesn't beat the trivial baseline here. One pattern showed up
-in both runs: it claimed a trend 16 times across two samples sharing no
-bars, and none of them realized. That's worth chasing — it points at the
-prompt rather than the pipeline.
+## Documentation
 
-This is a small sample on one instrument at one timeframe, and the
-harness says so rather than letting me round it up. The trade grader
-needs ~100 resolved trades and has 4, so it refuses to report at all.
-
-Full numbers and caveats: [`docs/results.md`](docs/results.md)
----
-
-## Why the harness refuses to answer
-
-This is the part I'd want you to look at.
-
-25 analyses on consecutive bars, each graded over the next 30 bars, share 29 of every 30 bars with their neighbour. That's one observation, not 25. Row count is not sample size.
-
-So the scorer counts how many forward windows are actually disjoint, and when there aren't enough it says so instead of printing a number:
-
-```
-Cannot support a regime accuracy against the majority-class baseline:
-25 rows, but only 1 independent window (5 needed). Overlapping forward
-windows inflate the row count without adding information — raise the
-replay stride.
-```
-
-The fix was to space the decision bars out. Same token cost, real observations.
-
-Every threshold is stored with the score, so any of them can be re-swept later without spending a cent. And the cycle threshold was swept on MSFT and then used to grade AAPL — chosen before the data it scores, not after.
-
-Design reasoning: [`docs/scoring-design.md`](docs/scoring-design.md)
-
----
-
-## How it's put together
-
-```
-data source ─▶ ingest ─▶ NATS ─▶ analyzer ─▶ SSE ─▶ browser
-                          │          │
-                       replay      SQLite
-```
-
-This was one script at first. I broke it up because a 5-second LLM call was blocking data ingestion, and I wanted to restart the analyzer without dropping candles.
-
-Now each piece runs in its own container and talks only over NATS.
-
-Design notes and the bugs worth reading about: [`docs/architecture.md`](docs/architecture.md)
-
----
-
-## Data sources
-
-| Source | What you get | Keys needed |
-|---|---|---|
-| `alpaca` **(default)** | US stocks + crypto, 13k symbols | `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` |
-| `binance` | Crypto pairs | none |
-| `demo` | Synthetic bars for offline work | none |
-
-**Binance can't be the default.** It returns HTTP 451 from US IP addresses, AWS included. That shows up as a `region_blocked` message in the UI rather than a silent hang.
-
-**Two Alpaca hosts, and mixing them up costs an afternoon.** `ALPACA_BASE_URL` is for trading endpoints, `ALPACA_DATA_URL` is for bars. Neither may end in `/v2` — the code adds that, so a versioned URL becomes `/v2/v2/assets` and 404s. Startup rejects it with an explicit message now.
-
-**Free-plan history is capped.** 1m through 1h give you the full 200 bars; 4h gives about 60 because equity intraday stops around 35 days back. Short backfills say so in the UI.
-
-Real bars and demo bars are marked at the row level, and every read filters to real data by default. I learned that one the hard way, twice.
-
----
-
-## Bring your own key
-
-You can run analyses on your own LLM credentials.
-
-- The key stays in your browser. By default it's in memory only and a reload clears it.
-- You can tick a box to save it in this browser. It then survives a reload and is readable by anyone with access to your machine — the panel says so plainly.
-- Either way it **never gets stored on my server**. It rides one request header, gets used for one call, and is discarded.
-- It never reaches the message bus, because JetStream writes messages to disk.
-- Provider error bodies are dropped on auth failures, because they echo your key back.
-
-There's a test that runs a real analysis and asserts the key appears in no log, no response, no database row and no bus message.
-
----
-
-## Requirements
-
-| | |
-|---|---|
-| OS | Linux, macOS, Windows (via Docker) |
-| Docker | Compose v2 |
-| Python | 3.11+ (local dev only) |
-| Node | 20+ (terminal only) |
-| Network | Access to your LLM provider |
-
----
-
-## Quick start
-
-```bash
-git clone https://github.com/epicconnnnor/Candle-Agent.git
-cd Candle-Agent
-cp .env.example .env     # add your keys
-docker compose up -d --build
-```
-
-Then the terminal:
-
-```bash
-cd terminal
-npm install
-npm run dev
-```
-
-Open http://localhost:5174
-
-Two things that will save you time:
-
-`docker compose restart` does **not** pick up an edited `.env`. Use `up -d`.
-
-`docker compose up -d` does **not** rebuild images after a code change. Use `up -d --build`.
-
----
-
-## Running a replay
-
-Price it before you spend anything:
-
-```bash
-curl -X POST localhost:8000/api/replay \
-  -H 'content-type: application/json' \
-  -d '{"symbol":"AAPL","interval":"1m","stride":30,"max_analyses":12,"dry_run":true}'
-```
-
-Drop `dry_run` to run it. Then score it:
-
-```bash
-curl -X POST localhost:8000/api/score \
-  -H 'content-type: application/json' \
-  -d '{"symbol":"AAPL","interval":"1m","replay_run_id":[7,8]}'
-```
-
-`max_analyses` is required. There's no way to start a run without saying how much you're willing to spend.
-
----
-
-## Tests
-
-```bash
-pytest
-ruff check .
-```
-
-276 tests. CI runs those plus an encoding check and a full compose build with health checks on every push.
-
----
-
-## Stack
-
-| | |
-|---|---|
-| Services | Python |
-| Messaging | NATS JetStream |
-| Storage | SQLite (WAL) |
-| Transport | Server-Sent Events |
-| Metrics | Prometheus |
-| Frontend | React, TypeScript, Vite, Tailwind |
-| Charting | lightweight-charts |
-| CI | GitHub Actions |
-
----
-
-## What's next
-
-- [ ] Deploy to AWS (ECS Fargate, Terraform)
-- [ ] Postgres instead of SQLite
-- [ ] A bigger sample — the trade grader needs ~100 resolved trades and has 4
-- [ ] Forex and gold, which needs the scoring thresholds re-swept per asset class
-
----
-
-**Disclaimer** — This is for learning and research. It is not investment advice. Trading carries risk and your decisions are your own.
+| Guide | What it covers |
+| --- | --- |
+| [Installation](docs/installation.md) | Install, launch, configure real data, stop, and update |
+| [User guide](docs/user-guide.md) | First analysis, chart controls, decisions, and follow-up |
+| [Configuration](docs/configuration.md) | Data sources, model settings, and API-key handling |
+| [Troubleshooting](docs/troubleshooting.md) | Connection, setup, data, and analysis problems |
+| [Technical guide](docs/technical-guide.md) | Repository map, services, API, replay, and scoring |
+| [Architecture](docs/architecture.md) | Design decisions and engineering tradeoffs |
+| [Contributing](CONTRIBUTING.md) | Development setup and checks |
 
 ## License
 
-MIT
+[MIT](LICENSE).
+
+For learning and research. Outputs are not investment advice; trading decisions remain your own.

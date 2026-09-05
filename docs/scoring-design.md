@@ -1,5 +1,7 @@
 # Scoring layer
 
+[Home](../README.md) · [Technical guide](technical-guide.md) · [Results](results.md)
+
 For every analysis in a replay run: what actually happened next?
 
 Three graders walk forward from the same decision bar. They exist
