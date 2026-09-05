@@ -1,5 +1,7 @@
 # Architecture
 
+[Home](../README.md) · [Technical guide](technical-guide.md) · [Installation](installation.md)
+
 Design notes: the decisions, and what forced them. Feature descriptions live
 in the README. Results live in [`results.md`](results.md); the scoring
 layer's own reasoning lives in [`scoring-design.md`](scoring-design.md).
